@@ -5,16 +5,16 @@ use embassy_rp::{peripherals::USB, usb::Driver};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_usb::{
 	Builder, Config, Handler,
-	class::hid::{HidReaderWriter, ReportId, RequestHandler, State},
-	control::OutResponse,
+	class::hid::{HidWriter, State},
 };
-use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
+use usbd_hid::descriptor::{KeyboardReport, MediaKeyboardReport, SerializedDescriptor};
 
 pub static OUTGOING: Channel<CriticalSectionRawMutex, Event, 32> = Channel::new();
 
 #[derive(Clone)]
 pub enum Event {
 	Update([u8; 6], u8),
+	Consumer(u16),
 }
 
 pub struct UsbConfig {
@@ -37,10 +37,10 @@ pub async fn usb_task(config: UsbConfig) -> ! {
 	// Microsoft compatible descriptor
 	let mut msos_descriptor = [0; 256];
 	let mut control_buf = [0; 64];
-	let mut request_handler = MyRequestHandler {};
 	let mut device_handler = MyDeviceHandler::new();
 
 	let mut state = State::new();
+	let mut media_state = State::new();
 
 	let mut builder = Builder::new(
 		driver,
@@ -59,62 +59,60 @@ pub async fn usb_task(config: UsbConfig) -> ! {
 		poll_ms:           2,
 		max_packet_size:   64,
 	};
-	let hid = HidReaderWriter::<_, 1, 8>::new(&mut builder, &mut state, config);
+	let mut hid = HidWriter::<_, 16>::new(&mut builder, &mut state, config);
+
+	let config = embassy_usb::class::hid::Config {
+		report_descriptor: MediaKeyboardReport::desc(),
+		request_handler:   None,
+		poll_ms:           2,
+		max_packet_size:   64,
+	};
+	let mut media_hid = HidWriter::<_, 4>::new(&mut builder, &mut media_state, config);
 
 	let mut usb = builder.build();
 
 	let usb_fut = usb.run();
 
-	let (reader, mut writer) = hid.split();
+	let in_fut = async {
+		loop {
+			let event = OUTGOING.receive().await;
 
-	loop {
-		let in_fut = async {
-			loop {
-				let event = OUTGOING.receive().await;
+			match event {
+				Event::Update(keycodes, modifier) => {
+					let report = KeyboardReport {
+						keycodes,
+						modifier,
+						leds: 0,
+						reserved: 0,
+					};
 
-				match event {
-					Event::Update(keycodes, modifier) => {
-						let report = KeyboardReport {
-							keycodes,
-							modifier,
-							leds: 0,
-							reserved: 0,
-						};
+					match hid.write_serialize(&report).await {
+						Ok(()) => {}
+						Err(_) => panic!(),
+					};
+				}
+				Event::Consumer(usage_id) => {
+					let report = MediaKeyboardReport { usage_id };
 
-						match writer.write_serialize(&report).await {
-							Ok(()) => {}
-							Err(_) => panic!(),
-						};
-					}
+					match media_hid.write_serialize(&report).await {
+						Ok(()) => {}
+						Err(_) => panic!(),
+					};
+
+					let report = MediaKeyboardReport { usage_id: 0 };
+
+					match media_hid.write_serialize(&report).await {
+						Ok(()) => {}
+						Err(_) => panic!(),
+					};
 				}
 			}
-		};
+		}
+	};
 
-		let out_fut = async {
-			reader.run(false, &mut request_handler).await;
-		};
+	join(usb_fut, in_fut).await;
 
-		join(usb_fut, join(in_fut, out_fut)).await;
-		panic!();
-	}
-}
-
-struct MyRequestHandler {}
-
-impl RequestHandler for MyRequestHandler {
-	fn get_report(&mut self, _id: ReportId, _buf: &mut [u8]) -> Option<usize> {
-		None
-	}
-
-	fn set_report(&mut self, _id: ReportId, _data: &[u8]) -> OutResponse {
-		OutResponse::Accepted
-	}
-
-	fn set_idle_ms(&mut self, _id: Option<ReportId>, _dur: u32) {}
-
-	fn get_idle_ms(&mut self, _id: Option<ReportId>) -> Option<u32> {
-		None
-	}
+	panic!();
 }
 
 struct MyDeviceHandler {
