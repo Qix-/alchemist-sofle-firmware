@@ -10,12 +10,7 @@
 //!
 //! The build script also sets the linker flags to tell it which link script to use.
 
-use std::{
-	env, fs,
-	fs::File,
-	io::{Read, Write},
-	path::{Path, PathBuf},
-};
+use std::{env, fs::File, io::Write, path::PathBuf};
 
 fn main() {
 	// Put `memory.x` in our output directory and ensure it's

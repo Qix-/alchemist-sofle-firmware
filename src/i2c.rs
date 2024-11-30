@@ -93,7 +93,7 @@ pub struct I2cMasterConfig {
 #[embassy_executor::task]
 pub async fn i2c_master_task(config: I2cMasterConfig) {
 	let mut i2c_config = i2c::Config::default();
-	i2c_config.frequency = 100_000;
+	i2c_config.frequency = 400_000;
 
 	let mut i2c = I2c::new_async(
 		config.i2c1,
@@ -109,7 +109,12 @@ pub async fn i2c_master_task(config: I2cMasterConfig) {
 
 	loop {
 		let oled_cmd = if config.comms_link {
-			let r = select3(OUTGOING.receive(), Timer::after_nanos(1000), OLED_CMD.wait()).await;
+			let r = select3(
+				OUTGOING.receive(),
+				Timer::after_nanos(100000),
+				OLED_CMD.wait(),
+			)
+			.await;
 
 			match r {
 				Either3::First(msg) => {
@@ -196,10 +201,7 @@ pub async fn i2c_slave_task(config: I2cSlaveConfig) {
 	let mut buf = [0u8; PACKET_SIZE];
 
 	loop {
-		let Ok(cmd) = i2c.listen(&mut buf).await else {
-			Timer::after_millis(3).await;
-			continue;
-		};
+		let cmd = i2c.listen(&mut buf).await.unwrap();
 
 		let respond = match cmd {
 			Command::Read => true,
