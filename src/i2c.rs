@@ -9,13 +9,13 @@ use embassy_sync::{
 };
 use embassy_time::Timer;
 
-pub const LINK_ADDR: u16 = 0x42;
+pub const LINK_ADDR: u16 = 0x32;
 pub const OLED_ADDR: u16 = 0x3C;
 
-pub const PACKET_SIZE: usize = 8;
+pub const PACKET_SIZE: usize = 4;
 
-pub static OUTGOING: Channel<CriticalSectionRawMutex, Packet, 32> = Channel::new();
-pub static INCOMING: Channel<CriticalSectionRawMutex, Packet, 32> = Channel::new();
+pub static OUTGOING: Channel<CriticalSectionRawMutex, Packet, 64> = Channel::new();
+pub static INCOMING: Channel<CriticalSectionRawMutex, Packet, 64> = Channel::new();
 pub static OLED_CMD: Signal<CriticalSectionRawMutex, OledCommand> = Signal::new();
 pub static OLED_IDLE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -28,6 +28,8 @@ pub enum OledCommand {
 
 #[derive(Clone)]
 pub enum Packet {
+	Reset,
+	Ready,
 	Down(u8, u8),
 	Up(u8, u8),
 }
@@ -48,6 +50,14 @@ impl Packet {
 				buf[2] = *y;
 				3
 			}
+			Packet::Reset => {
+				buf[0] = 3;
+				1
+			}
+			Packet::Ready => {
+				buf[0] = 4;
+				1
+			}
 		}
 	}
 
@@ -58,8 +68,10 @@ impl Packet {
 
 		// NOTE: do NOT use 0 as a packet type!
 		match buf[0] {
-			1 if buf.len() == 3 => Some(Packet::Down(buf[1], buf[2])),
-			2 if buf.len() == 3 => Some(Packet::Up(buf[1], buf[2])),
+			1 if buf.len() >= 3 => Some(Packet::Down(buf[1], buf[2])),
+			2 if buf.len() >= 3 => Some(Packet::Up(buf[1], buf[2])),
+			3 if buf.len() >= 1 => Some(Packet::Reset),
+			4 if buf.len() >= 1 => Some(Packet::Ready),
 			_ => None,
 		}
 	}
@@ -94,30 +106,22 @@ pub async fn i2c_master_task(config: I2cMasterConfig) {
 	let oled_ok = ssd1306_init(&mut i2c).await;
 
 	let mut buf = [0u8; PACKET_SIZE];
-	let mut read_buf = [0u8; PACKET_SIZE];
 
 	loop {
 		let oled_cmd = if config.comms_link {
-			let r = select3(OUTGOING.receive(), Timer::after_millis(1), OLED_CMD.wait()).await;
+			let r = select3(OUTGOING.receive(), Timer::after_nanos(1000), OLED_CMD.wait()).await;
 
 			match r {
 				Either3::First(msg) => {
 					let sz = msg.serialize(&mut buf);
-					if i2c
-						.write_read_async(LINK_ADDR, buf.iter().take(sz).copied(), &mut read_buf)
+					i2c.write_async(LINK_ADDR, buf.iter().take(sz).copied())
 						.await
-						.is_ok()
-					{
-						if let Some(msg) = Packet::deserialize(&read_buf) {
-							INCOMING.send(msg).await;
-						}
-					}
-
+						.unwrap();
 					continue;
 				}
 				Either3::Second(_) => {
-					if i2c.read_async(LINK_ADDR, &mut read_buf).await.is_ok() {
-						if let Some(msg) = Packet::deserialize(&read_buf) {
+					if i2c.read_async(LINK_ADDR, &mut buf).await.is_ok() {
+						if let Some(msg) = Packet::deserialize(&buf) {
 							INCOMING.send(msg).await;
 						}
 					}
@@ -140,7 +144,7 @@ pub async fn i2c_master_task(config: I2cMasterConfig) {
 							.chain([0].into_iter().cycle().take(128 * 32 / 8)),
 					)
 					.await
-					.ok();
+					.unwrap();
 				}
 				OledCommand::Debug => {
 					i2c.write_async(
@@ -156,7 +160,7 @@ pub async fn i2c_master_task(config: I2cMasterConfig) {
 						),
 					)
 					.await
-					.ok();
+					.unwrap();
 				}
 				OledCommand::Buffer(oled_buffer) => {
 					i2c.write_async(
@@ -166,7 +170,7 @@ pub async fn i2c_master_task(config: I2cMasterConfig) {
 							.chain(oled_buffer.iter().take(128 * 32 / 8).copied()),
 					)
 					.await
-					.ok();
+					.unwrap();
 				}
 			}
 		}
@@ -180,7 +184,7 @@ pub async fn i2c_master_task(config: I2cMasterConfig) {
 pub async fn i2c_slave_task(config: I2cSlaveConfig) {
 	let mut i2c_config = i2c_slave::Config::default();
 	i2c_config.addr = LINK_ADDR;
-	i2c_config.general_call = false;
+	i2c_config.general_call = true;
 	let mut i2c = I2cSlave::new(
 		config.i2c0,
 		config.pin_25,
@@ -189,7 +193,7 @@ pub async fn i2c_slave_task(config: I2cSlaveConfig) {
 		i2c_config,
 	);
 
-	let mut buf = [0u8; 8];
+	let mut buf = [0u8; PACKET_SIZE];
 
 	loop {
 		let Ok(cmd) = i2c.listen(&mut buf).await else {
@@ -217,9 +221,9 @@ pub async fn i2c_slave_task(config: I2cSlaveConfig) {
 		if respond {
 			if let Ok(msg) = OUTGOING.try_receive() {
 				let sz = msg.serialize(&mut buf);
-				i2c.respond_and_fill(&buf[..sz], 0).await.ok();
+				i2c.respond_and_fill(&buf[..sz], 0).await.unwrap();
 			} else {
-				i2c.respond_till_stop(0).await.ok();
+				i2c.respond_till_stop(0).await.unwrap();
 			}
 		}
 	}

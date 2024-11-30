@@ -8,6 +8,7 @@ pub mod led;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_rp::{
 	Peripherals, bind_interrupts,
 	gpio::{Input, Level, Output, OutputOpenDrain, Pin, Pull},
@@ -31,7 +32,7 @@ use embassy_usb::{
 use i2c::{I2cMasterConfig, I2cSlaveConfig, i2c_master_task, i2c_slave_task};
 use keyprobe::{KeyprobeConfig, keyprobe_task};
 use led::{LED_STATE, LedConfig, led_task};
-use panic_probe as _;
+use panic_reset as _;
 use usbd_hid::descriptor::{KeyboardReport, SerializedDescriptor};
 
 bind_interrupts!(pub struct Irqs {
@@ -106,23 +107,37 @@ async fn main(spawner: Spawner) {
 	spawner.spawn(keyprobe_task(keyprobe_config)).unwrap();
 
 	// Clear the OLED
-	i2c::OLED_CMD.signal(i2c::OledCommand::Clear);
-	i2c::OLED_IDLE.wait().await;
-	i2c::OLED_CMD.signal(i2c::OledCommand::Debug);
-	i2c::OLED_IDLE.wait().await;
+	// i2c::OLED_CMD.signal(i2c::OledCommand::Clear);
+	// i2c::OLED_IDLE.wait().await;
 
-	let mut count = 0;
+	if right_side {
+		i2c::OUTGOING.send(i2c::Packet::Ready).await;
+	} else {
+		i2c::OUTGOING.send(i2c::Packet::Reset).await;
+		let i2c::Packet::Ready = i2c::INCOMING.receive().await else {
+			panic!();
+		};
+	}
+
 	loop {
-		match keyprobe::EVENTS.receive().await {
-			keyprobe::Event::Down(_, _) => {
-				count += 1;
-				led::LED_STATE.signal(led::LedState::BlinkFast);
+		match select(keyprobe::EVENTS.receive(), i2c::INCOMING.receive()).await {
+			Either::First(keyprobe::Event::Down(x, y)) => {
+				i2c::OUTGOING.send(i2c::Packet::Down(x, y)).await;
 			}
-			keyprobe::Event::Up(_, _) => {
-				count -= 1;
-				if count == 0 {
-					led::LED_STATE.signal(led::LedState::Off);
-				}
+			Either::First(keyprobe::Event::Up(x, y)) => {
+				i2c::OUTGOING.send(i2c::Packet::Up(x, y)).await;
+			}
+			Either::Second(i2c::Packet::Down(_, _)) => {
+				led::LED_STATE.signal(led::LedState::On);
+			}
+			Either::Second(i2c::Packet::Up(_, _)) => {
+				led::LED_STATE.signal(led::LedState::Off);
+			}
+			Either::Second(i2c::Packet::Ready) => {
+				panic!();
+			}
+			Either::Second(i2c::Packet::Reset) => {
+				panic!();
 			}
 		}
 	}

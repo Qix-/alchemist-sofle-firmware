@@ -50,7 +50,7 @@ dependencies = [
  "fixed-macro",
  "heapless 0.8.0",
  "log",
- "panic-probe",
+ "panic-reset",
  "pio",
  "pio-proc",
  "portable-atomic",
@@ -982,10 +982,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1261fe7e33c73b354eab43b1273a57c8f967d0391e80353e51f764ac02cf6775"
 
 [[package]]
-name = "panic-probe"
-version = "0.3.2"
+name = "panic-reset"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4047d9235d1423d66cc97da7d07eddb54d4f154d6c13805c6d0793956f4f25b0"
+checksum = "6cf1ff2a5b1a478dd94572aa43476b6630e72071cbd016985003ad3903a3a4f5"
 dependencies = [
  "cortex-m",
 ]
