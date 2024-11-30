@@ -32,6 +32,8 @@ pub enum Packet {
 	Ready,
 	Down(u8, u8),
 	Up(u8, u8),
+	EncoderCw,
+	EncoderCcw,
 }
 
 impl Packet {
@@ -58,6 +60,14 @@ impl Packet {
 				buf[0] = 4;
 				1
 			}
+			Packet::EncoderCw => {
+				buf[0] = 5;
+				1
+			}
+			Packet::EncoderCcw => {
+				buf[0] = 6;
+				1
+			}
 		}
 	}
 
@@ -72,6 +82,8 @@ impl Packet {
 			2 if buf.len() >= 3 => Some(Packet::Up(buf[1], buf[2])),
 			3 if buf.len() >= 1 => Some(Packet::Reset),
 			4 if buf.len() >= 1 => Some(Packet::Ready),
+			5 if buf.len() >= 1 => Some(Packet::EncoderCw),
+			6 if buf.len() >= 1 => Some(Packet::EncoderCcw),
 			_ => None,
 		}
 	}

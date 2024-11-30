@@ -1,13 +1,14 @@
 #![no_std]
 #![no_main]
 
+pub mod encoder;
 pub mod i2c;
 pub mod keyprobe;
 pub mod led;
 pub mod usb;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_rp::{
 	Peripherals, bind_interrupts,
 	gpio::{Input, Level, OutputOpenDrain, Pull},
@@ -16,6 +17,7 @@ use embassy_rp::{
 	usb as rp_usb,
 };
 use embassy_time::Timer;
+use encoder::EncoderConfig;
 use i2c::{I2cMasterConfig, I2cSlaveConfig, i2c_master_task, i2c_slave_task};
 use keyprobe::{KeyprobeConfig, keyprobe_task};
 use led::{LedConfig, led_task};
@@ -117,6 +119,15 @@ async fn main(spawner: Spawner) {
 
 	spawner.spawn(keyprobe_task(keyprobe_config)).unwrap();
 
+	let encoder_config = EncoderConfig {
+		pin_29: p.PIN_29,
+		pin_28: p.PIN_28,
+	};
+
+	spawner
+		.spawn(encoder::encoder_task(encoder_config))
+		.unwrap();
+
 	// Clear the OLED
 	i2c::OLED_CMD.signal(i2c::OledCommand::Clear);
 	i2c::OLED_IDLE.wait().await;
@@ -139,8 +150,14 @@ async fn main(spawner: Spawner) {
 	let mut modifiers = 0;
 
 	loop {
-		match select(keyprobe::EVENTS.receive(), i2c::INCOMING.receive()).await {
-			Either::First(keyprobe::Event::Down(x, y)) => {
+		match select3(
+			keyprobe::EVENTS.receive(),
+			i2c::INCOMING.receive(),
+			encoder::EVENTS.receive(),
+		)
+		.await
+		{
+			Either3::First(keyprobe::Event::Down(x, y)) => {
 				dispatch_key(
 					&mut key_buffer,
 					&mut layer_mask,
@@ -153,7 +170,7 @@ async fn main(spawner: Spawner) {
 				);
 				i2c::OUTGOING.send(i2c::Packet::Down(x, y)).await;
 			}
-			Either::First(keyprobe::Event::Up(x, y)) => {
+			Either3::First(keyprobe::Event::Up(x, y)) => {
 				dispatch_key(
 					&mut key_buffer,
 					&mut layer_mask,
@@ -166,7 +183,7 @@ async fn main(spawner: Spawner) {
 				);
 				i2c::OUTGOING.send(i2c::Packet::Up(x, y)).await;
 			}
-			Either::Second(i2c::Packet::Down(x, y)) => {
+			Either3::Second(i2c::Packet::Down(x, y)) => {
 				dispatch_key(
 					&mut key_buffer,
 					&mut layer_mask,
@@ -179,7 +196,7 @@ async fn main(spawner: Spawner) {
 				);
 				led::LED_STATE.signal(led::LedState::On);
 			}
-			Either::Second(i2c::Packet::Up(x, y)) => {
+			Either3::Second(i2c::Packet::Up(x, y)) => {
 				dispatch_key(
 					&mut key_buffer,
 					&mut layer_mask,
@@ -192,11 +209,53 @@ async fn main(spawner: Spawner) {
 				);
 				led::LED_STATE.signal(led::LedState::Off);
 			}
-			Either::Second(i2c::Packet::Ready) => {
+			Either3::Second(i2c::Packet::Ready) => {
 				panic!();
 			}
-			Either::Second(i2c::Packet::Reset) => {
+			Either3::Second(i2c::Packet::Reset) => {
 				panic!();
+			}
+			Either3::Third(encoder::Event::Cw) => {
+				if right_side {
+					// Volume down
+					usb::OUTGOING.try_send(usb::Event::Consumer(0xEA)).ok();
+					i2c::OUTGOING.try_send(i2c::Packet::EncoderCcw).ok(); // (flipped)
+				} else {
+					// Next track
+					usb::OUTGOING.try_send(usb::Event::Consumer(0xB5)).ok();
+					i2c::OUTGOING.try_send(i2c::Packet::EncoderCw).ok();
+				}
+			}
+			Either3::Third(encoder::Event::Ccw) => {
+				if right_side {
+					// Volume up
+					usb::OUTGOING.try_send(usb::Event::Consumer(0xE9)).ok();
+					i2c::OUTGOING.try_send(i2c::Packet::EncoderCw).ok(); // (flipped)
+				} else {
+					// Previous track
+					usb::OUTGOING.try_send(usb::Event::Consumer(0xB6)).ok();
+					i2c::OUTGOING.try_send(i2c::Packet::EncoderCcw).ok();
+				}
+			}
+			Either3::Second(i2c::Packet::EncoderCw) => {
+				// NOTE: Reversed (since these are coming in from the other side)
+				if right_side {
+					// Next track
+					usb::OUTGOING.try_send(usb::Event::Consumer(0xB5)).ok();
+				} else {
+					// Volume up
+					usb::OUTGOING.try_send(usb::Event::Consumer(0xE9)).ok();
+				}
+			}
+			Either3::Second(i2c::Packet::EncoderCcw) => {
+				// NOTE: Reversed (since these are coming in from the other side)
+				if right_side {
+					// Previous track
+					usb::OUTGOING.try_send(usb::Event::Consumer(0xB6)).ok();
+				} else {
+					// Volume down
+					usb::OUTGOING.try_send(usb::Event::Consumer(0xEA)).ok();
+				}
 			}
 		}
 	}
