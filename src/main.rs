@@ -2,9 +2,11 @@
 #![no_main]
 
 pub mod encoder;
+pub mod frames;
 pub mod i2c;
 pub mod keyprobe;
 pub mod led;
+pub mod oled;
 pub mod usb;
 
 use embassy_executor::Spawner;
@@ -59,8 +61,6 @@ async fn main(spawner: Spawner) {
 	let p = embassy_rp::init(Default::default());
 
 	// Test if we're the right side.
-	//
-	// We do this by attempting to write to the OLED device
 	let right_side = {
 		// The two pins to check are pin 25 and pin 12.
 		let p = unsafe { Peripherals::steal() };
@@ -80,6 +80,34 @@ async fn main(spawner: Spawner) {
 		r
 	};
 
+	// Now wait for the other side.
+	{
+		let p = unsafe { Peripherals::steal() };
+		if right_side {
+			let mut signal_to = OutputOpenDrain::new(p.PIN_25, Level::High);
+			let mut read_from = Input::new(p.PIN_12, Pull::None);
+			Timer::after_millis(10).await;
+
+			read_from.wait_for_high().await;
+			Timer::after_millis(10).await;
+			signal_to.set_low();
+			Timer::after_millis(20).await;
+			read_from.wait_for_low().await;
+			Timer::after_millis(20).await;
+			signal_to.set_high();
+			Timer::after_millis(10).await;
+		} else {
+			let mut read_from = Input::new(p.PIN_3, Pull::None);
+			let mut signal_to = OutputOpenDrain::new(p.PIN_2, Level::High);
+			read_from.wait_for_high().await;
+			read_from.wait_for_low().await;
+			Timer::after_millis(10).await;
+			signal_to.set_low();
+			read_from.wait_for_high().await;
+			Timer::after_millis(10).await;
+		}
+	}
+
 	let led_config = LedConfig { pin_17: p.PIN_17 };
 
 	spawner.spawn(led_task(led_config)).unwrap();
@@ -87,8 +115,8 @@ async fn main(spawner: Spawner) {
 	let master_config = I2cMasterConfig {
 		comms_link: !right_side,
 		i2c1:       p.I2C1,
-		pin_2:      p.PIN_2,
 		pin_3:      p.PIN_3,
+		pin_2:      p.PIN_2,
 	};
 
 	spawner.spawn(i2c_master_task(master_config)).unwrap();
@@ -132,18 +160,35 @@ async fn main(spawner: Spawner) {
 	i2c::OLED_CMD.signal(i2c::OledCommand::Clear);
 	i2c::OLED_IDLE.wait().await;
 
-	if right_side {
-		i2c::OUTGOING.send(i2c::Packet::Ready).await;
-	} else {
-		i2c::OUTGOING.send(i2c::Packet::Reset).await;
-		let i2c::Packet::Ready = i2c::INCOMING.receive().await else {
-			panic!();
-		};
-	}
+	Timer::after_millis(20).await;
+
+	// if right_side {
+	// 	i2c::OUTGOING.send(i2c::Packet::Ready).await;
+	//} else {
+	// 	i2c::OUTGOING.send(i2c::Packet::Reset).await;
+	// 	let i2c::Packet::Ready = i2c::INCOMING.receive().await else {
+	// 		panic!();
+	// 	};
+	//}
 
 	let usb_config = usb::UsbConfig { usb_dev: p.USB };
 
 	spawner.spawn(usb::usb_task(usb_config)).unwrap();
+
+	let oled_config = oled::OledConfig {
+		scene:         if right_side {
+			oled::Scene::Banner
+		} else {
+			oled::Scene::Alchemist
+		},
+		star_movement: if right_side {
+			oled::StarMovement::Down
+		} else {
+			oled::StarMovement::Up
+		},
+	};
+
+	spawner.spawn(oled::oled_task(oled_config)).unwrap();
 
 	let mut key_buffer: [u8; 6] = [0; 6];
 	let mut layer_mask = 0;
@@ -169,6 +214,7 @@ async fn main(spawner: Spawner) {
 					true,
 				);
 				i2c::OUTGOING.send(i2c::Packet::Down(x, y)).await;
+				oled::spawn_star();
 			}
 			Either3::First(keyprobe::Event::Up(x, y)) => {
 				dispatch_key(
@@ -182,6 +228,7 @@ async fn main(spawner: Spawner) {
 					false,
 				);
 				i2c::OUTGOING.send(i2c::Packet::Up(x, y)).await;
+				oled::spawn_star();
 			}
 			Either3::Second(i2c::Packet::Down(x, y)) => {
 				dispatch_key(
@@ -195,6 +242,7 @@ async fn main(spawner: Spawner) {
 					true,
 				);
 				led::LED_STATE.signal(led::LedState::On);
+				oled::spawn_star();
 			}
 			Either3::Second(i2c::Packet::Up(x, y)) => {
 				dispatch_key(
@@ -208,13 +256,14 @@ async fn main(spawner: Spawner) {
 					false,
 				);
 				led::LED_STATE.signal(led::LedState::Off);
+				oled::spawn_star();
 			}
-			Either3::Second(i2c::Packet::Ready) => {
-				panic!();
-			}
-			Either3::Second(i2c::Packet::Reset) => {
-				panic!();
-			}
+			// Either3::Second(i2c::Packet::Ready) => {
+			// 	panic!();
+			//}
+			// Either3::Second(i2c::Packet::Reset) => {
+			// 	panic!();
+			//}
 			Either3::Third(encoder::Event::Cw) => {
 				if right_side {
 					// Volume down

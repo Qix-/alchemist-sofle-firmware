@@ -7,7 +7,7 @@ use embassy_rp::{
 use embassy_sync::{
 	blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer, with_timeout};
 
 pub const LINK_ADDR: u16 = 0x32;
 pub const OLED_ADDR: u16 = 0x3C;
@@ -28,8 +28,8 @@ pub enum OledCommand {
 
 #[derive(Clone)]
 pub enum Packet {
-	Reset,
-	Ready,
+	// Reset,
+	// Ready,
 	Down(u8, u8),
 	Up(u8, u8),
 	EncoderCw,
@@ -52,14 +52,14 @@ impl Packet {
 				buf[2] = *y;
 				3
 			}
-			Packet::Reset => {
-				buf[0] = 3;
-				1
-			}
-			Packet::Ready => {
-				buf[0] = 4;
-				1
-			}
+			// Packet::Reset => {
+			// 	buf[0] = 3;
+			// 	1
+			//}
+			// Packet::Ready => {
+			// 	buf[0] = 4;
+			// 	1
+			//}
 			Packet::EncoderCw => {
 				buf[0] = 5;
 				1
@@ -80,8 +80,8 @@ impl Packet {
 		match buf[0] {
 			1 if buf.len() >= 3 => Some(Packet::Down(buf[1], buf[2])),
 			2 if buf.len() >= 3 => Some(Packet::Up(buf[1], buf[2])),
-			3 if buf.len() >= 1 => Some(Packet::Reset),
-			4 if buf.len() >= 1 => Some(Packet::Ready),
+			// 3 if buf.len() >= 1 => Some(Packet::Reset),
+			// 4 if buf.len() >= 1 => Some(Packet::Ready),
 			5 if buf.len() >= 1 => Some(Packet::EncoderCw),
 			6 if buf.len() >= 1 => Some(Packet::EncoderCcw),
 			_ => None,
@@ -105,7 +105,7 @@ pub struct I2cMasterConfig {
 #[embassy_executor::task]
 pub async fn i2c_master_task(config: I2cMasterConfig) {
 	let mut i2c_config = i2c::Config::default();
-	i2c_config.frequency = 400_000;
+	i2c_config.frequency = 100_000;
 
 	let mut i2c = I2c::new_async(
 		config.i2c1,
@@ -131,15 +131,23 @@ pub async fn i2c_master_task(config: I2cMasterConfig) {
 			match r {
 				Either3::First(msg) => {
 					let sz = msg.serialize(&mut buf);
-					i2c.write_async(LINK_ADDR, buf.iter().take(sz).copied())
-						.await
-						.unwrap();
+					with_timeout(
+						Duration::from_millis(100),
+						i2c.write_async(LINK_ADDR, buf.iter().take(sz).copied()),
+					)
+					.await
+					.ok();
 					continue;
 				}
 				Either3::Second(_) => {
-					if i2c.read_async(LINK_ADDR, &mut buf).await.is_ok() {
+					if let Ok(Ok(_)) = with_timeout(
+						Duration::from_millis(100),
+						i2c.read_async(LINK_ADDR, &mut buf),
+					)
+					.await
+					{
 						if let Some(msg) = Packet::deserialize(&buf) {
-							INCOMING.send(msg).await;
+							INCOMING.try_send(msg).ok();
 						}
 					}
 
@@ -191,6 +199,8 @@ pub async fn i2c_master_task(config: I2cMasterConfig) {
 				}
 			}
 		}
+
+		Timer::after_nanos(10000).await;
 
 		// Tell the OLED task that we're done with the buffer.
 		OLED_IDLE.signal(());
