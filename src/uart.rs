@@ -13,6 +13,7 @@ pub static INCOMING: Channel<CriticalSectionRawMutex, Packet, 64> = Channel::new
 pub static OUTGOING: Channel<CriticalSectionRawMutex, Packet, 64> = Channel::new();
 
 pub const PACKET_SIZE: usize = 3;
+const BAUD: u32 = 115200;
 
 #[derive(Clone)]
 pub enum Packet {
@@ -78,19 +79,19 @@ pub async fn uart_task(config: UartConfig) -> ! {
 	match config.side {
 		BoardSide::Left => {
 			let tx_program = PioUartTxProgram::new(&mut common);
-			let mut uart_tx = PioUartTx::new(9600, &mut common, sm0, config.pin_1, &tx_program);
+			let mut uart_tx = PioUartTx::new(BAUD, &mut common, sm0, config.pin_1, &tx_program);
 
 			let rx_program = PioUartRxProgram::new(&mut common);
-			let mut uart_rx = PioUartRx::new(9600, &mut common, sm1, config.pin_4, &rx_program);
+			let mut uart_rx = PioUartRx::new(BAUD, &mut common, sm1, config.pin_4, &rx_program);
 
 			join(uart_read(&mut uart_rx), uart_write(&mut uart_tx)).await;
 		}
 		BoardSide::Right => {
 			let tx_program = PioUartTxProgram::new(&mut common);
-			let mut uart_tx = PioUartTx::new(9600, &mut common, sm0, config.pin_4, &tx_program);
+			let mut uart_tx = PioUartTx::new(BAUD, &mut common, sm0, config.pin_4, &tx_program);
 
 			let rx_program = PioUartRxProgram::new(&mut common);
-			let mut uart_rx = PioUartRx::new(9600, &mut common, sm1, config.pin_1, &rx_program);
+			let mut uart_rx = PioUartRx::new(BAUD, &mut common, sm1, config.pin_1, &rx_program);
 
 			join(uart_read(&mut uart_rx), uart_write(&mut uart_tx)).await;
 		}

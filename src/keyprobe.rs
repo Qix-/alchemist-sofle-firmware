@@ -7,7 +7,7 @@ use embassy_rp::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::Timer;
 
-pub const KEY_BOUNCE_THRESHOLD: u8 = 5;
+pub const KEY_BOUNCE_THRESHOLD: u8 = 7;
 
 pub static EVENTS: Channel<CriticalSectionRawMutex, Event, 64> = Channel::new();
 
@@ -60,7 +60,7 @@ pub async fn keyprobe_task(keyboard_config: KeyprobeConfig) {
 		// Strobe the pins to check for key presses.
 		for (x, output) in outputs.iter_mut().enumerate() {
 			output.set_high();
-			Timer::after_nanos(1000).await;
+			Timer::after_micros(3).await;
 
 			for (y, input) in [&mut in_0, &mut in_1, &mut in_2, &mut in_3, &mut in_4]
 				.iter_mut()
@@ -94,6 +94,6 @@ pub async fn keyprobe_task(keyboard_config: KeyprobeConfig) {
 			output.set_low();
 		}
 
-		Timer::after_nanos(100000).await;
+		Timer::after_micros(100).await;
 	}
 }

@@ -11,16 +11,17 @@ use crate::frames;
 const SZ: usize = 128 * 32 / 8;
 const ROW_SZ: usize = 32 / 8;
 const OLED_ADDR: u16 = 0x3C;
+const FREQUENCY: u32 = 200_000;
 
 static mut BUFFERS: [[u8; SZ]; 2] = [[0; SZ]; 2];
 
 static mut STAR_SPAWN_COUNT: usize = 0;
-static mut SIGIL_NUM: usize = 0;
+static mut SIGIL_UPDATE: bool = true;
 
 pub fn spawn_star() {
 	unsafe {
 		STAR_SPAWN_COUNT += 1;
-		SIGIL_NUM = SIGIL_NUM.wrapping_add(1);
+		SIGIL_UPDATE = true;
 	}
 }
 
@@ -49,7 +50,7 @@ pub async fn oled_task(config: OledConfig) -> ! {
 	static mut STAR_BUFFER: [u8; SZ] = [0; SZ];
 
 	let mut i2c_config = i2c::Config::default();
-	i2c_config.frequency = 100_000;
+	i2c_config.frequency = FREQUENCY;
 	let mut i2c = I2c::new_async(
 		config.i2c1,
 		config.pin_3,
@@ -66,12 +67,19 @@ pub async fn oled_task(config: OledConfig) -> ! {
 
 	let mut frame_counter: usize = 0;
 
-	unsafe {
-		SIGIL_NUM = rng.gen_range(0..frames::SIGILS.len());
-	}
+	let mut sigil_num = 0;
+	let mut sig_x = 0;
+	let mut sig_y = 0;
 
 	loop {
 		frame_counter = frame_counter.wrapping_add(1);
+
+		if unsafe { SIGIL_UPDATE } {
+			sigil_num = rng.gen_range(0..frames::SIGILS.len());
+			sig_x = (rng.gen_range(0..2) + 1) * 8;
+			sig_y = (rng.gen_range(0..4) + 4) * 8;
+			unsafe { SIGIL_UPDATE = false };
+		}
 
 		let buffer = unsafe { &mut BUFFERS[buffer_idx] };
 		buffer_idx = 1 - buffer_idx;
@@ -122,36 +130,32 @@ pub async fn oled_task(config: OledConfig) -> ! {
 		};
 
 		// Apply the scene
-		let sigil = &frames::SIGILS[unsafe { SIGIL_NUM } % frames::SIGILS.len()];
+		let sigil = &frames::SIGILS[sigil_num % frames::SIGILS.len()];
+
 		match config.scene {
 			Scene::Banner => {
 				apply_mask(
 					buffer,
-					&frames::BANNER[(frame_counter / 9) % frames::BANNER.len()],
+					&frames::BANNER[(frame_counter / 10) % frames::BANNER.len()],
 					0,
 					0,
 				);
-				apply_mask(buffer, sigil, (32 - sigil.width) >> 1 + 8, 36);
+				apply_mask(buffer, sigil, sig_x, sig_y + 32);
 			}
 			Scene::Alchemist => {
 				apply_mask(
 					buffer,
-					&frames::BODY[(frame_counter / 9) % frames::BODY.len()],
+					&frames::BODY[(frame_counter / 25) % frames::BODY.len()],
 					0,
 					128 - 32,
 				);
-				apply_mask(
-					buffer,
-					sigil,
-					(32 - sigil.width) >> 1,
-					128 - 64 - sigil.height,
-				);
+				apply_mask(buffer, sigil, sig_x, sig_y);
 			}
 		}
 
 		send_buffer(&mut i2c, buffer).await;
 
-		Timer::after_millis(1000 / 16).await;
+		Timer::after_millis(1000 / 64).await;
 	}
 }
 
