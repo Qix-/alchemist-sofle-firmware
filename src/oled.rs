@@ -4,7 +4,7 @@ use embassy_rp::{
 	peripherals::{I2C1, PIN_2, PIN_3},
 };
 use embassy_time::Timer;
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 
 use crate::frames;
 
@@ -62,7 +62,7 @@ pub async fn oled_task(config: OledConfig) -> ! {
 	clear(&mut i2c).await;
 
 	let mut buffer_idx = 0;
-	let mut rng = RoscRng;
+	let mut rng = SmallRng::from_rng(RoscRng).unwrap();
 
 	let mut frame_counter: usize = 0;
 
