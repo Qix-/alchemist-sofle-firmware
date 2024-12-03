@@ -1,5 +1,8 @@
-use embassy_futures::join::join;
-use embassy_rp::clocks::RoscRng;
+use embassy_rp::{
+	clocks::RoscRng,
+	i2c::{self, Async, I2c},
+	peripherals::{I2C1, PIN_2, PIN_3},
+};
 use embassy_time::Timer;
 use rand::Rng;
 
@@ -7,6 +10,7 @@ use crate::frames;
 
 const SZ: usize = 128 * 32 / 8;
 const ROW_SZ: usize = 32 / 8;
+const OLED_ADDR: u16 = 0x3C;
 
 static mut BUFFERS: [[u8; SZ]; 2] = [[0; SZ]; 2];
 
@@ -35,11 +39,27 @@ pub enum StarMovement {
 pub struct OledConfig {
 	pub scene:         Scene,
 	pub star_movement: StarMovement,
+	pub i2c1:          I2C1,
+	pub pin_3:         PIN_3,
+	pub pin_2:         PIN_2,
 }
 
 #[embassy_executor::task]
 pub async fn oled_task(config: OledConfig) -> ! {
 	static mut STAR_BUFFER: [u8; SZ] = [0; SZ];
+
+	let mut i2c_config = i2c::Config::default();
+	i2c_config.frequency = 100_000;
+	let mut i2c = I2c::new_async(
+		config.i2c1,
+		config.pin_3,
+		config.pin_2,
+		crate::Irqs,
+		i2c_config,
+	);
+
+	init(&mut i2c).await;
+	clear(&mut i2c).await;
 
 	let mut buffer_idx = 0;
 	let mut rng = RoscRng;
@@ -129,8 +149,9 @@ pub async fn oled_task(config: OledConfig) -> ! {
 			}
 		}
 
-		crate::i2c::OLED_CMD.signal(crate::i2c::OledCommand::Buffer(buffer));
-		join(Timer::after_millis(1000 / 16), crate::i2c::OLED_IDLE.wait()).await;
+		send_buffer(&mut i2c, buffer).await;
+
+		Timer::after_millis(1000 / 16).await;
 	}
 }
 
@@ -150,4 +171,59 @@ fn apply_mask(buffer: &mut [u8; 128 * 32 / 8], frame: &frames::Frame, pos_x: usi
 			*buffer_byte = (*buffer_byte & !mask) | add;
 		}
 	}
+}
+
+async fn clear(i2c: &mut I2c<'_, I2C1, Async>) {
+	i2c.write_async(
+		OLED_ADDR,
+		[0b0100_0000]
+			.into_iter()
+			.chain([0].into_iter().cycle().take(128 * 32 / 8)),
+	)
+	.await
+	.ok();
+}
+
+async fn send_buffer(i2c: &mut I2c<'_, I2C1, Async>, oled_buffer: &[u8]) {
+	i2c.write_async(
+		OLED_ADDR,
+		[0b0100_0000]
+			.into_iter()
+			.chain(oled_buffer.iter().take(128 * 32 / 8).copied()),
+	)
+	.await
+	.ok();
+}
+
+async fn init(i2c: &mut I2c<'_, I2C1, Async>) -> bool {
+	macro_rules! write_cmd {
+		($($data:expr),*) => {
+			i2c.write_async(OLED_ADDR, [0x00, $($data),*]).await.map_err(|_| ())?;
+		};
+	}
+
+	let r: Result<(), ()> = async {
+		write_cmd!(0xAE); // display off
+		write_cmd!(0xA8, 0x1F); // set MUX Ratio
+		write_cmd!(0xD3, 0x00); // set display offset
+		write_cmd!(0x40 | 0x0); // memory Start
+		write_cmd!(0xA0); // normal x
+		write_cmd!(0xC8); // COM output mode
+		write_cmd!(0xDA, 0x02); // COM pin hardware configuration
+		write_cmd!(0x81, 0x7F); // contrast max
+		write_cmd!(0xA4); // A5 for on, A4 for use RAM
+		write_cmd!(0xA6); // A6 for Normal/A7 for inverse
+		write_cmd!(0xD5, 0x01); // set oscolation frequency
+		write_cmd!(0x8D, 0x14); // set charge pump
+		write_cmd!(0xAF); // turn on screen
+
+		write_cmd!(0x20, 0b01); // set address mode
+		write_cmd!(0x21, 0, 127); // set column address
+		write_cmd!(0x22, 0, 3); // set page address
+
+		Ok(())
+	}
+	.await;
+
+	r.is_ok()
 }

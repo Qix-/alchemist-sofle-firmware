@@ -2,22 +2,19 @@
 
 pub mod encoder;
 pub mod frames;
-pub mod i2c;
 pub mod keyprobe;
 pub mod led;
 pub mod oled;
+pub mod uart;
 pub mod usb;
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
 use embassy_rp::{
-	Peripherals, bind_interrupts,
-	gpio::{Input, Level, OutputOpenDrain, Pull},
-	i2c as rp_i2c,
-	peripherals::{I2C0, I2C1, USB},
+	bind_interrupts, i2c as rp_i2c,
+	peripherals::{I2C1, USB},
 	usb as rp_usb,
 };
-use embassy_time::Timer;
 use encoder::EncoderConfig;
 use keyprobe::{KeyprobeConfig, keyprobe_task};
 use led::{LedConfig, led_task};
@@ -25,32 +22,31 @@ use panic_reset as _;
 
 bind_interrupts!(pub struct Irqs {
 	USBCTRL_IRQ => rp_usb::InterruptHandler<USB>;
-	I2C0_IRQ => rp_i2c::InterruptHandler<I2C0>;
 	I2C1_IRQ => rp_i2c::InterruptHandler<I2C1>;
 });
 
 #[rustfmt::skip]
 static KEYMAP: [[[u8; 12]; 5]; 3] = [
 	[
-		[0x29, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2A],
-		[0x2B, 0x14, 0x1A, 0x08, 0x15, 0x17, 0x1C, 0x18, 0x0C, 0x12, 0x13, 0x2E],
-		[0xE0, 0x04, 0x16, 0x07, 0x09, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F, 0x33, 0x34],
-		[0xE1, 0x1D, 0x1B, 0x06, 0x19, 0x05, 0x11, 0x10, 0x36, 0x37, 0x38, 0x31],
-		[0x4A, 0x4D, 0xE2, 0x2C, 0xE3, 0x00, 0x00, 0x28, 0x2C, 0x00, 0x00, 0x00],
+		[0x29, 0x1E, 0x1F, 0x20, 0x21, 0x22,    0x23, 0x24, 0x25, 0x26, 0x27, 0x2A],
+		[0x2B, 0x14, 0x1A, 0x08, 0x15, 0x17,    0x1C, 0x18, 0x0C, 0x12, 0x13, 0x2E],
+		[0xE0, 0x04, 0x16, 0x07, 0x09, 0x0A,    0x0B, 0x0D, 0x0E, 0x0F, 0x33, 0x34],
+		[0xE1, 0x1D, 0x1B, 0x06, 0x19, 0x05,    0x11, 0x10, 0x36, 0x37, 0x38, 0x31],
+		[0x4A, 0x4D, 0xE2, 0x2C, 0xE3, 0x00,    0x00, 0x28, 0x2C, 0x00, 0x00, 0x00],
 	],
 	[
-		[0x35, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x2D],
-		[0x00, 0x44, 0x45, 0x68, 0x69, 0x6A, 0x6B, 0x6C, 0x6D, 0x6E, 0x2F, 0x30],
-		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x52, 0x00, 0x00, 0x00],
-		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50, 0x51, 0x4F, 0x00, 0x00],
-		[0x4B, 0x4E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+		[0x35, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E,    0x3F, 0x40, 0x41, 0x42, 0x43, 0x2D],
+		[0x00, 0x44, 0x45, 0x68, 0x69, 0x6A,    0x6B, 0x6C, 0x6D, 0x6E, 0x2F, 0x30],
+		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00,    0x00, 0x00, 0x52, 0x00, 0x00, 0x00],
+		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00,    0x00, 0x50, 0x51, 0x4F, 0x00, 0x00],
+		[0x4B, 0x4E, 0x00, 0x00, 0x00, 0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
 	],
 	[
-		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4C],
-		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x4C],
+		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+		[0x00, 0x00, 0x00, 0x00, 0x00, 0x00,    0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
 	]
 ];
 
@@ -92,41 +88,36 @@ pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 		.spawn(encoder::encoder_task(encoder_config))
 		.unwrap();
 
-	// Clear the OLED
-	// i2c::OLED_CMD.signal(i2c::OledCommand::Clear);
-	// i2c::OLED_IDLE.wait().await;
-
-	Timer::after_millis(20).await;
-
 	let usb_config = usb::UsbConfig { usb_dev: p.USB };
 
 	spawner.spawn(usb::usb_task(usb_config)).unwrap();
 
-	// let oled_config = oled::OledConfig {
-	// 	scene:         if right_side {
-	// 		oled::Scene::Banner
-	// 	} else {
-	// 		oled::Scene::Alchemist
-	// 	},
-	// 	star_movement: if right_side {
-	// 		oled::StarMovement::Down
-	// 	} else {
-	// 		oled::StarMovement::Up
-	// 	},
-	//};
+	let oled_config = oled::OledConfig {
+		scene:         match side {
+			BoardSide::Right => oled::Scene::Banner,
+			BoardSide::Left => oled::Scene::Alchemist,
+		},
+		star_movement: match side {
+			BoardSide::Right => oled::StarMovement::Down,
+			BoardSide::Left => oled::StarMovement::Up,
+		},
+		i2c1:          p.I2C1,
+		pin_3:         p.PIN_3,
+		pin_2:         p.PIN_2,
+	};
 
-	// spawner.spawn(oled::oled_task(oled_config)).unwrap();
+	spawner.spawn(oled::oled_task(oled_config)).unwrap();
 
 	let mut key_buffer: [u8; 6] = [0; 6];
 	let mut layer_mask = 0;
 	let mut modifiers = 0;
 
-	let right_side = false;
+	let right_side = side == BoardSide::Right;
 
 	loop {
 		match select3(
 			keyprobe::EVENTS.receive(),
-			i2c::INCOMING.receive(),
+			uart::INCOMING.receive(),
 			encoder::EVENTS.receive(),
 		)
 		.await
@@ -142,7 +133,7 @@ pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 					right_side,
 					true,
 				);
-				i2c::OUTGOING.send(i2c::Packet::Down(x, y)).await;
+				uart::OUTGOING.send(uart::Packet::Down(x, y)).await;
 				oled::spawn_star();
 			}
 			Either3::First(keyprobe::Event::Up(x, y)) => {
@@ -156,10 +147,10 @@ pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 					right_side,
 					false,
 				);
-				i2c::OUTGOING.send(i2c::Packet::Up(x, y)).await;
+				uart::OUTGOING.send(uart::Packet::Up(x, y)).await;
 				oled::spawn_star();
 			}
-			Either3::Second(i2c::Packet::Down(x, y)) => {
+			Either3::Second(uart::Packet::Down(x, y)) => {
 				dispatch_key(
 					&mut key_buffer,
 					&mut layer_mask,
@@ -173,7 +164,7 @@ pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 				led::LED_STATE.signal(led::LedState::On);
 				oled::spawn_star();
 			}
-			Either3::Second(i2c::Packet::Up(x, y)) => {
+			Either3::Second(uart::Packet::Up(x, y)) => {
 				dispatch_key(
 					&mut key_buffer,
 					&mut layer_mask,
@@ -187,35 +178,29 @@ pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 				led::LED_STATE.signal(led::LedState::Off);
 				oled::spawn_star();
 			}
-			// Either3::Second(i2c::Packet::Ready) => {
-			// 	panic!();
-			//}
-			// Either3::Second(i2c::Packet::Reset) => {
-			// 	panic!();
-			//}
 			Either3::Third(encoder::Event::Cw) => {
 				if right_side {
 					// Volume down
 					usb::OUTGOING.try_send(usb::Event::Consumer(0xEA)).ok();
-					i2c::OUTGOING.try_send(i2c::Packet::EncoderCcw).ok(); // (flipped)
+					uart::OUTGOING.try_send(uart::Packet::EncoderCcw).ok(); // (flipped)
 				} else {
 					// Next track
 					usb::OUTGOING.try_send(usb::Event::Consumer(0xB5)).ok();
-					i2c::OUTGOING.try_send(i2c::Packet::EncoderCw).ok();
+					uart::OUTGOING.try_send(uart::Packet::EncoderCw).ok();
 				}
 			}
 			Either3::Third(encoder::Event::Ccw) => {
 				if right_side {
 					// Volume up
 					usb::OUTGOING.try_send(usb::Event::Consumer(0xE9)).ok();
-					i2c::OUTGOING.try_send(i2c::Packet::EncoderCw).ok(); // (flipped)
+					uart::OUTGOING.try_send(uart::Packet::EncoderCw).ok(); // (flipped)
 				} else {
 					// Previous track
 					usb::OUTGOING.try_send(usb::Event::Consumer(0xB6)).ok();
-					i2c::OUTGOING.try_send(i2c::Packet::EncoderCcw).ok();
+					uart::OUTGOING.try_send(uart::Packet::EncoderCcw).ok();
 				}
 			}
-			Either3::Second(i2c::Packet::EncoderCw) => {
+			Either3::Second(uart::Packet::EncoderCw) => {
 				// NOTE: Reversed (since these are coming in from the other side)
 				if right_side {
 					// Next track
@@ -225,7 +210,7 @@ pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 					usb::OUTGOING.try_send(usb::Event::Consumer(0xE9)).ok();
 				}
 			}
-			Either3::Second(i2c::Packet::EncoderCcw) => {
+			Either3::Second(uart::Packet::EncoderCcw) => {
 				// NOTE: Reversed (since these are coming in from the other side)
 				if right_side {
 					// Previous track
