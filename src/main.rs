@@ -20,7 +20,6 @@ use embassy_rp::{
 };
 use embassy_time::Timer;
 use encoder::EncoderConfig;
-use i2c::{I2cMasterConfig, I2cSlaveConfig, i2c_master_task, i2c_slave_task};
 use keyprobe::{KeyprobeConfig, keyprobe_task};
 use led::{LedConfig, led_task};
 use panic_reset as _;
@@ -112,23 +111,10 @@ async fn main(spawner: Spawner) {
 
 	spawner.spawn(led_task(led_config)).unwrap();
 
-	let master_config = I2cMasterConfig {
-		comms_link: !right_side,
-		i2c1:       p.I2C1,
-		pin_3:      p.PIN_3,
-		pin_2:      p.PIN_2,
-	};
-
-	spawner.spawn(i2c_master_task(master_config)).unwrap();
-
 	if right_side {
-		let slave_config = I2cSlaveConfig {
-			i2c0:   p.I2C0,
-			pin_25: p.PIN_25,
-			pin_12: p.PIN_12,
-		};
-
-		spawner.spawn(i2c_slave_task(slave_config)).unwrap();
+		spawner.spawn(i2c::i2c_right_task()).unwrap();
+	} else {
+		spawner.spawn(i2c::i2c_left_task()).unwrap();
 	}
 
 	let keyprobe_config = KeyprobeConfig {
@@ -161,15 +147,6 @@ async fn main(spawner: Spawner) {
 	i2c::OLED_IDLE.wait().await;
 
 	Timer::after_millis(20).await;
-
-	// if right_side {
-	// 	i2c::OUTGOING.send(i2c::Packet::Ready).await;
-	//} else {
-	// 	i2c::OUTGOING.send(i2c::Packet::Reset).await;
-	// 	let i2c::Packet::Ready = i2c::INCOMING.receive().await else {
-	// 		panic!();
-	// 	};
-	//}
 
 	let usb_config = usb::UsbConfig { usb_dev: p.USB };
 
@@ -258,12 +235,6 @@ async fn main(spawner: Spawner) {
 				led::LED_STATE.signal(led::LedState::Off);
 				oled::spawn_star();
 			}
-			// Either3::Second(i2c::Packet::Ready) => {
-			// 	panic!();
-			//}
-			// Either3::Second(i2c::Packet::Reset) => {
-			// 	panic!();
-			//}
 			Either3::Third(encoder::Event::Cw) => {
 				if right_side {
 					// Volume down
@@ -306,6 +277,7 @@ async fn main(spawner: Spawner) {
 					usb::OUTGOING.try_send(usb::Event::Consumer(0xEA)).ok();
 				}
 			}
+			Either3::Second(i2c::Packet::Noop) => {}
 		}
 	}
 }
