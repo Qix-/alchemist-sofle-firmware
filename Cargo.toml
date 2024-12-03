@@ -5,9 +5,18 @@ edition = "2021"
 
 build = "build.rs"
 
-[[bin]]
+[lib]
 name = "alchemist"
-path = "src/main.rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "alchemist-left"
+path = "src/main_left.rs"
+
+[[bin]]
+name = "alchemist-right"
+path = "src/main_right.rs"
+
 
 [dependencies]
 embassy-embedded-hal = { version = "0.2", git = "https://github.com/embassy-rs/embassy.git" }

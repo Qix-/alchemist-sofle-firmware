@@ -1,5 +1,4 @@
 #![no_std]
-#![no_main]
 
 pub mod encoder;
 pub mod frames;
@@ -20,7 +19,6 @@ use embassy_rp::{
 };
 use embassy_time::Timer;
 use encoder::EncoderConfig;
-use i2c::{I2cMasterConfig, I2cSlaveConfig, i2c_master_task, i2c_slave_task};
 use keyprobe::{KeyprobeConfig, keyprobe_task};
 use led::{LedConfig, led_task};
 use panic_reset as _;
@@ -56,80 +54,18 @@ static KEYMAP: [[[u8; 12]; 5]; 3] = [
 	]
 ];
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub enum BoardSide {
+	Left,
+	Right,
+}
+
+pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 	let p = embassy_rp::init(Default::default());
-
-	// Test if we're the right side.
-	let right_side = {
-		// The two pins to check are pin 25 and pin 12.
-		let p = unsafe { Peripherals::steal() };
-		let sda = OutputOpenDrain::new(p.PIN_25, Level::Low);
-		let scl = OutputOpenDrain::new(p.PIN_12, Level::Low);
-		Timer::after_millis(1).await;
-		drop(sda);
-		drop(scl);
-		let p = unsafe { Peripherals::steal() };
-		Timer::after_millis(2).await;
-		let sda = Input::new(p.PIN_25, Pull::None);
-		let scl = Input::new(p.PIN_12, Pull::None);
-		Timer::after_millis(2).await;
-		let r = sda.is_high() && scl.is_high();
-		drop(sda);
-		drop(scl);
-		r
-	};
-
-	// Now wait for the other side.
-	{
-		let p = unsafe { Peripherals::steal() };
-		if right_side {
-			let mut signal_to = OutputOpenDrain::new(p.PIN_25, Level::High);
-			let mut read_from = Input::new(p.PIN_12, Pull::None);
-			Timer::after_millis(10).await;
-
-			read_from.wait_for_high().await;
-			Timer::after_millis(10).await;
-			signal_to.set_low();
-			Timer::after_millis(20).await;
-			read_from.wait_for_low().await;
-			Timer::after_millis(20).await;
-			signal_to.set_high();
-			Timer::after_millis(10).await;
-		} else {
-			let mut read_from = Input::new(p.PIN_3, Pull::None);
-			let mut signal_to = OutputOpenDrain::new(p.PIN_2, Level::High);
-			read_from.wait_for_high().await;
-			read_from.wait_for_low().await;
-			Timer::after_millis(10).await;
-			signal_to.set_low();
-			read_from.wait_for_high().await;
-			Timer::after_millis(10).await;
-		}
-	}
 
 	let led_config = LedConfig { pin_17: p.PIN_17 };
 
 	spawner.spawn(led_task(led_config)).unwrap();
-
-	let master_config = I2cMasterConfig {
-		comms_link: !right_side,
-		i2c1:       p.I2C1,
-		pin_3:      p.PIN_3,
-		pin_2:      p.PIN_2,
-	};
-
-	spawner.spawn(i2c_master_task(master_config)).unwrap();
-
-	if right_side {
-		let slave_config = I2cSlaveConfig {
-			i2c0:   p.I2C0,
-			pin_25: p.PIN_25,
-			pin_12: p.PIN_12,
-		};
-
-		spawner.spawn(i2c_slave_task(slave_config)).unwrap();
-	}
 
 	let keyprobe_config = KeyprobeConfig {
 		pin_27: p.PIN_27,
@@ -157,42 +93,35 @@ async fn main(spawner: Spawner) {
 		.unwrap();
 
 	// Clear the OLED
-	i2c::OLED_CMD.signal(i2c::OledCommand::Clear);
-	i2c::OLED_IDLE.wait().await;
+	// i2c::OLED_CMD.signal(i2c::OledCommand::Clear);
+	// i2c::OLED_IDLE.wait().await;
 
 	Timer::after_millis(20).await;
-
-	// if right_side {
-	// 	i2c::OUTGOING.send(i2c::Packet::Ready).await;
-	//} else {
-	// 	i2c::OUTGOING.send(i2c::Packet::Reset).await;
-	// 	let i2c::Packet::Ready = i2c::INCOMING.receive().await else {
-	// 		panic!();
-	// 	};
-	//}
 
 	let usb_config = usb::UsbConfig { usb_dev: p.USB };
 
 	spawner.spawn(usb::usb_task(usb_config)).unwrap();
 
-	let oled_config = oled::OledConfig {
-		scene:         if right_side {
-			oled::Scene::Banner
-		} else {
-			oled::Scene::Alchemist
-		},
-		star_movement: if right_side {
-			oled::StarMovement::Down
-		} else {
-			oled::StarMovement::Up
-		},
-	};
+	// let oled_config = oled::OledConfig {
+	// 	scene:         if right_side {
+	// 		oled::Scene::Banner
+	// 	} else {
+	// 		oled::Scene::Alchemist
+	// 	},
+	// 	star_movement: if right_side {
+	// 		oled::StarMovement::Down
+	// 	} else {
+	// 		oled::StarMovement::Up
+	// 	},
+	//};
 
-	spawner.spawn(oled::oled_task(oled_config)).unwrap();
+	// spawner.spawn(oled::oled_task(oled_config)).unwrap();
 
 	let mut key_buffer: [u8; 6] = [0; 6];
 	let mut layer_mask = 0;
 	let mut modifiers = 0;
+
+	let right_side = false;
 
 	loop {
 		match select3(

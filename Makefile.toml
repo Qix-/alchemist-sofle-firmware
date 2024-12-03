@@ -7,7 +7,7 @@ install_crate = { crate_name = "flip-link", binary = "flip-link", test_arg = ["-
 [tasks.deps]
 dependencies = ["install-llvm-tools", "flip-link"]
 
-[tasks.objcopy]
+[tasks.objcopy-left]
 install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = [
     "objcopy",
     "--help",
@@ -17,22 +17,55 @@ args = [
     "objcopy",
     "--release",
     "--bin",
-    "alchemist",
+    "alchemist-left",
     "--",
     "-O",
     "ihex",
-    "alchemist.hex",
+    "alchemist-left.hex",
 ]
 
-[tasks.uf2]
+[tasks.objcopy-right]
+install_crate = { crate_name = "cargo-binutils", binary = "cargo", test_arg = [
+    "objcopy",
+    "--help",
+] }
+command = "cargo"
+args = [
+    "objcopy",
+    "--release",
+    "--bin",
+    "alchemist-right",
+    "--",
+    "-O",
+    "ihex",
+    "alchemist-right.hex",
+]
+
+[tasks.uf2-left]
 command = "python"
 args = [
     "scripts/uf2conv.py",
-    "alchemist.hex",
+    "alchemist-left.hex",
     "-c",
     "-f",
     "0xe48bff56",                  # Use your chip family ID in the uf2conv.py file as -f argument
     "-o",
-    "alchemist.uf2",
+    "alchemist-left.uf2",
 ]
-dependencies = ["objcopy"]
+dependencies = ["objcopy-left"]
+
+[tasks.uf2-right]
+command = "python"
+args = [
+    "scripts/uf2conv.py",
+    "alchemist-right.hex",
+    "-c",
+    "-f",
+    "0xe48bff56",                  # Use your chip family ID in the uf2conv.py file as -f argument
+    "-o",
+    "alchemist-right.uf2",
+]
+dependencies = ["objcopy-right"]
+
+[tasks.uf2]
+dependencies = ["uf2-right", "uf2-left"]
