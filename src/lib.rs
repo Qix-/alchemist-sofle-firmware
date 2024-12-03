@@ -12,8 +12,8 @@ use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
 use embassy_rp::{
 	bind_interrupts, i2c as rp_i2c,
-	peripherals::{I2C1, USB},
-	usb as rp_usb,
+	peripherals::{I2C1, PIO0, USB},
+	pio, usb as rp_usb,
 };
 use encoder::EncoderConfig;
 use keyprobe::{KeyprobeConfig, keyprobe_task};
@@ -23,6 +23,7 @@ use panic_reset as _;
 bind_interrupts!(pub struct Irqs {
 	USBCTRL_IRQ => rp_usb::InterruptHandler<USB>;
 	I2C1_IRQ => rp_i2c::InterruptHandler<I2C1>;
+	PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
 });
 
 #[rustfmt::skip]
@@ -107,6 +108,15 @@ pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 	};
 
 	spawner.spawn(oled::oled_task(oled_config)).unwrap();
+
+	let uart_config = uart::UartConfig {
+		pin_1: p.PIN_1,
+		pin_4: p.PIN_4,
+		side,
+		pio0: p.PIO0,
+	};
+
+	spawner.spawn(uart::uart_task(uart_config)).unwrap();
 
 	let mut key_buffer: [u8; 6] = [0; 6];
 	let mut layer_mask = 0;

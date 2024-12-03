@@ -1,4 +1,13 @@
+use embassy_futures::join::join;
+use embassy_rp::{
+	peripherals::{PIN_1, PIN_4, PIO0},
+	pio,
+	pio_programs::uart::{PioUartRx, PioUartRxProgram, PioUartTx, PioUartTxProgram},
+};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+use embedded_io_async::{Read, Write};
+
+use crate::BoardSide;
 
 pub static INCOMING: Channel<CriticalSectionRawMutex, Packet, 64> = Channel::new();
 pub static OUTGOING: Channel<CriticalSectionRawMutex, Packet, 64> = Channel::new();
@@ -47,5 +56,64 @@ impl Packet {
 			6 => Some(Packet::EncoderCcw),
 			_ => None,
 		}
+	}
+}
+
+pub struct UartConfig {
+	pub pio0:  PIO0,
+	pub pin_1: PIN_1,
+	pub pin_4: PIN_4,
+	pub side:  BoardSide,
+}
+
+#[embassy_executor::task]
+pub async fn uart_task(config: UartConfig) -> ! {
+	let pio::Pio {
+		mut common,
+		sm0,
+		sm1,
+		..
+	} = pio::Pio::new(config.pio0, crate::Irqs);
+
+	match config.side {
+		BoardSide::Left => {
+			let tx_program = PioUartTxProgram::new(&mut common);
+			let mut uart_tx = PioUartTx::new(9600, &mut common, sm0, config.pin_1, &tx_program);
+
+			let rx_program = PioUartRxProgram::new(&mut common);
+			let mut uart_rx = PioUartRx::new(9600, &mut common, sm1, config.pin_4, &rx_program);
+
+			join(uart_read(&mut uart_rx), uart_write(&mut uart_tx)).await;
+		}
+		BoardSide::Right => {
+			let tx_program = PioUartTxProgram::new(&mut common);
+			let mut uart_tx = PioUartTx::new(9600, &mut common, sm0, config.pin_4, &tx_program);
+
+			let rx_program = PioUartRxProgram::new(&mut common);
+			let mut uart_rx = PioUartRx::new(9600, &mut common, sm1, config.pin_1, &rx_program);
+
+			join(uart_read(&mut uart_rx), uart_write(&mut uart_tx)).await;
+		}
+	}
+
+	unreachable!();
+}
+
+async fn uart_read<const S: usize>(uart_rx: &mut PioUartRx<'_, PIO0, S>) -> ! {
+	let mut buf = [0; PACKET_SIZE];
+	loop {
+		uart_rx.read_exact(&mut buf).await.unwrap();
+		if let Some(packet) = Packet::deserialize(buf) {
+			INCOMING.send(packet).await;
+		}
+	}
+}
+
+async fn uart_write<const S: usize>(uart_rx: &mut PioUartTx<'_, PIO0, S>) -> ! {
+	let mut buf = [0; PACKET_SIZE];
+	loop {
+		let packet = OUTGOING.receive().await;
+		packet.serialize(&mut buf);
+		uart_rx.write_all(&buf).await.unwrap();
 	}
 }
