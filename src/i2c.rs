@@ -1,3 +1,8 @@
+use core::{
+	convert::Infallible,
+	sync::atomic::{AtomicBool, Ordering},
+};
+
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_rp::{
@@ -11,19 +16,24 @@ use embassy_rp::{
 use embassy_sync::{
 	blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Timer, with_timeout};
+
+const FREQ: u32 = 100_000;
 
 pub const LINK_ADDR: u16 = 0x32;
 pub const OLED_ADDR: u16 = 0x3C;
 
 pub const PACKET_SIZE: usize = 4;
 
-pub static OUTGOING: Channel<CriticalSectionRawMutex, Packet, 64> = Channel::new();
+pub static OUTGOING: Channel<CriticalSectionRawMutex, Packet, 128> = Channel::new();
 pub static INCOMING: Channel<CriticalSectionRawMutex, Packet, 64> = Channel::new();
+
 pub static OLED_CMD: Signal<CriticalSectionRawMutex, OledCommand> = Signal::new();
 pub static OLED_IDLE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+pub static OLED_OK: AtomicBool = AtomicBool::new(true);
 
-static OUTGOING_MULTIPLEX: Channel<CriticalSectionRawMutex, MultiplexedPacket, 16> = Channel::new();
+static OUTGOING_MULTIPLEX: Channel<CriticalSectionRawMutex, MultiplexedPacket, 128> =
+	Channel::new();
 
 enum MultiplexedPacket {
 	Oled(OledCommand),
@@ -35,6 +45,7 @@ pub enum OledCommand {
 	Clear,
 	Buffer(&'static [u8]),
 	Debug,
+	Init,
 }
 
 #[derive(Clone)]
@@ -70,7 +81,10 @@ impl Packet {
 				buf[0] = 6;
 				1
 			}
-			Packet::Noop => 0xFF,
+			Packet::Noop => {
+				buf[0] = 0xFF;
+				1
+			}
 		}
 	}
 
@@ -83,8 +97,8 @@ impl Packet {
 		match buf[0] {
 			1 if buf.len() >= 3 => Some(Packet::Down(buf[1], buf[2])),
 			2 if buf.len() >= 3 => Some(Packet::Up(buf[1], buf[2])),
-			5 if buf.len() >= 1 => Some(Packet::EncoderCw),
-			6 if buf.len() >= 1 => Some(Packet::EncoderCcw),
+			5 => Some(Packet::EncoderCw),
+			6 => Some(Packet::EncoderCcw),
 			0xFF => Some(Packet::Noop),
 			_ => None,
 		}
@@ -101,10 +115,6 @@ pub async fn i2c_left_task() -> ! {
 
 #[embassy_executor::task]
 pub async fn i2c_right_task() -> ! {
-	if !ssd1306_init().await {
-		panic!();
-	}
-
 	let spawner = Spawner::for_current_executor().await;
 	spawner.spawn(multiplex_outgoing()).unwrap();
 	spawner.spawn(handle_local_oled()).unwrap();
@@ -114,18 +124,14 @@ pub async fn i2c_right_task() -> ! {
 
 #[embassy_executor::task]
 async fn handle_local_oled() -> ! {
-	if !ssd1306_init().await {
-		panic!();
-	}
-
 	let p = unsafe { Peripherals::steal() };
 	let mut config = i2c::Config::default();
-	config.frequency = 100_000;
+	config.frequency = FREQ;
 	let mut i2c = I2c::new_async(p.I2C1, p.PIN_3, p.PIN_2, crate::Irqs, config);
 
 	loop {
 		let cmd = OLED_CMD.wait().await;
-		i2c.handle_oled_command(cmd).await;
+		i2c.handle_oled_command(&cmd).await.ok();
 		OLED_IDLE.signal(());
 	}
 }
@@ -146,16 +152,10 @@ async fn multiplex_oled() -> ! {
 	}
 }
 
-async fn ssd1306_init() -> bool {
-	let p = unsafe { Peripherals::steal() };
-
-	let mut config = i2c::Config::default();
-	config.frequency = 100_000;
-	let mut i2c = I2c::new_async(p.I2C1, p.PIN_3, p.PIN_2, crate::Irqs, config);
-
+async fn ssd1306_init(i2c: &mut I2c<'_, I2C1, i2c::Async>) -> bool {
 	macro_rules! write_cmd {
 		($($data:expr),*) => {
-			i2c.blocking_write(OLED_ADDR, &[0x00, $($data),*]).map_err(|_| ())?;
+			i2c.write_async(OLED_ADDR, [0x00, $($data),*]).await.map_err(|_| ())?;
 		};
 	}
 
@@ -186,24 +186,33 @@ async fn ssd1306_init() -> bool {
 }
 
 async fn run_comms_i2c1() -> ! {
-	run_comms(crate::Irqs, || {
-		// SAFETY: None. Fuck the law.
-		let p = unsafe { Peripherals::steal() };
-		(p.I2C1, p.PIN_3, p.PIN_2)
-	})
-	.await;
+	loop {
+		run_comms(crate::Irqs, || {
+			// SAFETY: None. To heck with the law.
+			let p = unsafe { Peripherals::steal() };
+			(p.I2C1, p.PIN_3, p.PIN_2)
+		})
+		.await
+		.ok();
+	}
 }
 
 async fn run_comms_i2c0() -> ! {
-	run_comms(crate::Irqs, || {
-		// SAFETY: None. Fuck the law.
-		let p = unsafe { Peripherals::steal() };
-		(p.I2C0, p.PIN_25, p.PIN_12)
-	})
-	.await;
+	loop {
+		run_comms(crate::Irqs, || {
+			// SAFETY: None. To heck with the law.
+			let p = unsafe { Peripherals::steal() };
+			(p.I2C0, p.PIN_25, p.PIN_12)
+		})
+		.await
+		.ok();
+	}
 }
 
-async fn run_comms<'d, F, T, Dev, SclP, SdaP, Scl, Sda, Irqs>(irqs: Irqs, get_device_pins: F) -> !
+async fn run_comms<'d, F, T, Dev, SclP, SdaP, Scl, Sda, Irqs>(
+	irqs: Irqs,
+	get_device_pins: F,
+) -> Result<Infallible, ()>
 where
 	T: i2c::Instance + 'd,
 	F: Fn() -> (Dev, Scl, Sda),
@@ -217,6 +226,22 @@ where
 {
 	let mut buf = [0_u8; PACKET_SIZE];
 
+	let slave_config = {
+		let mut d = i2c_slave::Config::default();
+		d.addr = LINK_ADDR;
+		d.general_call = false;
+		d
+	};
+
+	let master_config = {
+		let mut d = i2c::Config::default();
+		d.frequency = FREQ;
+		d
+	};
+
+	let p = unsafe { Peripherals::steal() };
+	let mut dbgpin = Output::new(p.PIN_15, Level::High);
+
 	loop {
 		// Wait for incoming or outgoing call
 		{
@@ -224,78 +249,124 @@ where
 
 			let mut input = Input::new(sda_pin, Pull::Down);
 
-			let on_rising_edge = input.wait_for_high();
+			let on_fall = async {
+				loop {
+					input.wait_for_low().await;
+					Timer::after_micros(20).await;
+					if input.is_low() {
+						break;
+					}
+				}
+			};
 			let on_outgoing = OUTGOING_MULTIPLEX.receive();
 
-			let r = select(on_rising_edge, on_outgoing).await;
+			let r = select(on_fall, on_outgoing).await;
 
 			drop(input);
 
 			match r {
 				// The other side is calling
 				Either::First(_) => {
+					// Answer the call.
+					dbgpin.set_low();
+					let (_, _, sda_pin) = get_device_pins();
+					let output = Output::new(sda_pin, Level::High);
+					Timer::after_micros(10).await;
+					drop(output);
+					dbgpin.set_high();
+
 					// Configure an I2C Slave.
 					let (dev, scl_pin, sda_pin) = get_device_pins();
 
-					let config = {
-						let mut d = i2c_slave::Config::default();
-						d.addr = LINK_ADDR;
-						d.general_call = false;
-						d
+					let mut slave = I2cSlave::new(dev, scl_pin, sda_pin, irqs, slave_config);
+
+					let command = match with_timeout(
+						Duration::from_millis(3),
+						slave.listen(&mut buf),
+					)
+					.await
+					{
+						Err(_) | Ok(Err(_)) => {
+							slave.reset();
+							return Err(());
+						}
+						Ok(Ok(command)) => command,
 					};
-
-					let mut slave = I2cSlave::new(dev, scl_pin, sda_pin, irqs, config);
-
-					let command = slave.listen(&mut buf).await.unwrap_or_else(|_| {
-						slave.reset();
-						panic!();
-					});
 
 					match command {
 						Command::Write(sz) => {
-							if let Some(_msg) = Packet::deserialize(&buf[..sz]) {
-								if !matches!(Packet::Noop, _msg) {
-									INCOMING.try_send(_msg).ok();
+							if let Some(msg) = Packet::deserialize(&buf[..sz]) {
+								if !matches!(msg, Packet::Noop) {
+									INCOMING.try_send(msg).ok();
 								}
 							}
 						}
 						_ => {
-							// We don't support this.
-							panic!();
+							return Err(());
 						}
 					}
 				}
 				// We need to make a call.
 				Either::Second(cmd) => {
-					// Signal call.
-					let (_, _, sda_pin) = get_device_pins();
-					let output = Output::new(sda_pin, Level::High);
-					Timer::after(Duration::from_micros(10)).await;
-					drop(output);
-
-					let (dev, scl_pin, sda_pin) = get_device_pins();
-
-					let mut config = i2c::Config::default();
-					config.frequency = 100_000;
-					let mut i2c = I2c::new_async(dev, scl_pin, sda_pin, irqs, config);
-
-					match cmd {
-						MultiplexedPacket::I2c(cmd) => {
-							let sz = cmd.serialize(&mut buf);
-							i2c.write_async(LINK_ADDR, buf.iter().take(sz).copied())
-								.await
-								.unwrap();
+					let mut ok = false;
+					for _ in 0..3 {
+						// Signal call.
+						dbgpin.set_low();
+						let (_, _, sda_pin) = get_device_pins();
+						let mut dial_tone = Input::new(sda_pin, Pull::Down);
+						Timer::after_micros(5).await;
+						let dial_result =
+							with_timeout(Duration::from_micros(300), dial_tone.wait_for_high())
+								.await;
+						drop(dial_tone);
+						Timer::after_micros(5).await;
+						dbgpin.set_high();
+						if dial_result.is_err() {
+							continue;
 						}
-						MultiplexedPacket::Oled(cmd) => {
-							i2c.handle_oled_command(cmd).await;
-							// It was an OLED command; the other half is still waiting for a response.
-							// Send a NOOP to signal that we're done.
-							let sz = Packet::Noop.serialize(&mut buf);
-							i2c.write_async(LINK_ADDR, buf.iter().take(sz).copied())
-								.await
-								.unwrap();
-							OLED_IDLE.signal(());
+
+						let (dev, scl_pin, sda_pin) = get_device_pins();
+
+						let mut i2c = I2c::new_async(dev, scl_pin, sda_pin, irqs, master_config);
+
+						Timer::after_micros(40).await;
+
+						match cmd {
+							MultiplexedPacket::I2c(ref cmd) => {
+								let sz = cmd.serialize(&mut buf);
+								ok = i2c
+									.write_async(LINK_ADDR, buf.iter().take(sz).copied())
+									.await
+									.is_ok();
+							}
+							MultiplexedPacket::Oled(ref cmd) => {
+								if OLED_OK.load(Ordering::Relaxed) {
+									if i2c.handle_oled_command(cmd).await.is_err() {
+										OLED_OK.store(false, Ordering::Relaxed);
+									}
+								}
+								OLED_IDLE.signal(());
+
+								// It was an OLED command; the other half is still waiting for a response.
+								// Send a NOOP to signal that we're done.
+								let sz = Packet::Noop.serialize(&mut buf);
+
+								i2c.write_async(LINK_ADDR, buf.iter().take(sz).copied())
+									.await
+									.ok();
+
+								// Best effort basis.
+								ok = true;
+							}
 						}
+
+						if ok {
+							break;
+						}
+					}
+
+					if !ok {
+						return Err(());
 					}
 				}
 			}
@@ -304,17 +375,17 @@ where
 }
 
 trait HandleOledCommand {
-	async fn handle_oled_command(&mut self, cmd: OledCommand);
+	async fn handle_oled_command(&mut self, cmd: &OledCommand) -> Result<(), ()>;
 }
 
 impl HandleOledCommand for I2c<'_, I2C0, Async> {
-	async fn handle_oled_command(&mut self, _cmd: OledCommand) {
+	async fn handle_oled_command(&mut self, _cmd: &OledCommand) -> Result<(), ()> {
 		panic!();
 	}
 }
 
 impl HandleOledCommand for I2c<'_, I2C1, Async> {
-	async fn handle_oled_command(&mut self, cmd: OledCommand) {
+	async fn handle_oled_command(&mut self, cmd: &OledCommand) -> Result<(), ()> {
 		match cmd {
 			OledCommand::Clear => {
 				self.write_async(
@@ -324,7 +395,7 @@ impl HandleOledCommand for I2c<'_, I2C1, Async> {
 						.chain([0].into_iter().cycle().take(128 * 32 / 8)),
 				)
 				.await
-				.unwrap();
+				.map_err(|_| ())?;
 			}
 			OledCommand::Debug => {
 				self.write_async(
@@ -340,7 +411,7 @@ impl HandleOledCommand for I2c<'_, I2C1, Async> {
 					),
 				)
 				.await
-				.unwrap();
+				.map_err(|_| ())?;
 			}
 			OledCommand::Buffer(oled_buffer) => {
 				self.write_async(
@@ -350,8 +421,15 @@ impl HandleOledCommand for I2c<'_, I2C1, Async> {
 						.chain(oled_buffer.iter().take(128 * 32 / 8).copied()),
 				)
 				.await
-				.unwrap();
+				.map_err(|_| ())?;
+			}
+			OledCommand::Init => {
+				if !ssd1306_init(self).await {
+					return Err(());
+				}
 			}
 		}
+
+		Ok(())
 	}
 }

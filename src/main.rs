@@ -13,7 +13,7 @@ use embassy_executor::Spawner;
 use embassy_futures::select::{Either3, select3};
 use embassy_rp::{
 	Peripherals, bind_interrupts,
-	gpio::{Input, Level, OutputOpenDrain, Pull},
+	gpio::{Input, Pull},
 	i2c as rp_i2c,
 	peripherals::{I2C0, I2C1, USB},
 	usb as rp_usb,
@@ -59,53 +59,17 @@ static KEYMAP: [[[u8; 12]; 5]; 3] = [
 async fn main(spawner: Spawner) {
 	let p = embassy_rp::init(Default::default());
 
+	Timer::after_millis(10).await;
+
 	// Test if we're the right side.
 	let right_side = {
 		// The two pins to check are pin 25 and pin 12.
 		let p = unsafe { Peripherals::steal() };
-		let sda = OutputOpenDrain::new(p.PIN_25, Level::Low);
-		let scl = OutputOpenDrain::new(p.PIN_12, Level::Low);
-		Timer::after_millis(1).await;
-		drop(sda);
-		drop(scl);
-		let p = unsafe { Peripherals::steal() };
-		Timer::after_millis(2).await;
 		let sda = Input::new(p.PIN_25, Pull::None);
 		let scl = Input::new(p.PIN_12, Pull::None);
-		Timer::after_millis(2).await;
-		let r = sda.is_high() && scl.is_high();
-		drop(sda);
-		drop(scl);
-		r
+		Timer::after_millis(10).await;
+		sda.is_high() || scl.is_high()
 	};
-
-	// Now wait for the other side.
-	{
-		let p = unsafe { Peripherals::steal() };
-		if right_side {
-			let mut signal_to = OutputOpenDrain::new(p.PIN_25, Level::High);
-			let mut read_from = Input::new(p.PIN_12, Pull::None);
-			Timer::after_millis(10).await;
-
-			read_from.wait_for_high().await;
-			Timer::after_millis(10).await;
-			signal_to.set_low();
-			Timer::after_millis(20).await;
-			read_from.wait_for_low().await;
-			Timer::after_millis(20).await;
-			signal_to.set_high();
-			Timer::after_millis(10).await;
-		} else {
-			let mut read_from = Input::new(p.PIN_3, Pull::None);
-			let mut signal_to = OutputOpenDrain::new(p.PIN_2, Level::High);
-			read_from.wait_for_high().await;
-			read_from.wait_for_low().await;
-			Timer::after_millis(10).await;
-			signal_to.set_low();
-			read_from.wait_for_high().await;
-			Timer::after_millis(10).await;
-		}
-	}
 
 	let led_config = LedConfig { pin_17: p.PIN_17 };
 
@@ -142,7 +106,9 @@ async fn main(spawner: Spawner) {
 		.spawn(encoder::encoder_task(encoder_config))
 		.unwrap();
 
-	// Clear the OLED
+	// Init + Clear the OLED
+	i2c::OLED_CMD.signal(i2c::OledCommand::Init);
+	i2c::OLED_IDLE.wait().await;
 	i2c::OLED_CMD.signal(i2c::OledCommand::Clear);
 	i2c::OLED_IDLE.wait().await;
 
@@ -218,7 +184,6 @@ async fn main(spawner: Spawner) {
 					right_side,
 					true,
 				);
-				led::LED_STATE.signal(led::LedState::On);
 				oled::spawn_star();
 			}
 			Either3::Second(i2c::Packet::Up(x, y)) => {
@@ -232,7 +197,6 @@ async fn main(spawner: Spawner) {
 					right_side,
 					false,
 				);
-				led::LED_STATE.signal(led::LedState::Off);
 				oled::spawn_star();
 			}
 			Either3::Third(encoder::Event::Cw) => {
@@ -343,18 +307,12 @@ fn update_key_data(
 	if x == 5 && y == 4 {
 		if down {
 			usb::OUTGOING.try_send(usb::Event::Consumer(0xCD)).ok();
-			led::LED_STATE.signal(led::LedState::BlinkFast);
-		} else {
-			led::LED_STATE.signal(led::LedState::Off);
 		}
 		return false;
 	}
 	if x == 6 && y == 4 {
 		if down {
 			usb::OUTGOING.try_send(usb::Event::Consumer(0xE2)).ok();
-			led::LED_STATE.signal(led::LedState::BlinkSlow);
-		} else {
-			led::LED_STATE.signal(led::LedState::Off);
 		}
 		return false;
 	}

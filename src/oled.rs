@@ -107,7 +107,7 @@ pub async fn oled_task(config: OledConfig) -> ! {
 			Scene::Banner => {
 				apply_mask(
 					buffer,
-					&frames::BANNER[(frame_counter / 9) % frames::BANNER.len()],
+					&frames::BANNER[(frame_counter / 5) % frames::BANNER.len()],
 					0,
 					0,
 				);
@@ -116,7 +116,7 @@ pub async fn oled_task(config: OledConfig) -> ! {
 			Scene::Alchemist => {
 				apply_mask(
 					buffer,
-					&frames::BODY[(frame_counter / 9) % frames::BODY.len()],
+					&frames::BODY[(frame_counter / 5) % frames::BODY.len()],
 					0,
 					128 - 32,
 				);
@@ -130,7 +130,7 @@ pub async fn oled_task(config: OledConfig) -> ! {
 		}
 
 		crate::i2c::OLED_CMD.signal(crate::i2c::OledCommand::Buffer(buffer));
-		join(Timer::after_millis(1000 / 16), crate::i2c::OLED_IDLE.wait()).await;
+		join(Timer::after_millis(1000 / 8), crate::i2c::OLED_IDLE.wait()).await;
 	}
 }
 

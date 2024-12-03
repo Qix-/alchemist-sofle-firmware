@@ -56,7 +56,7 @@ panic = 'unwind'
 
 [profile.release]
 codegen-units = 1       # better optimizations
-debug = true            # no overhead for bare-metal
-opt-level = "z"         # optimize for binary size
+debug = false
+opt-level = 3           # optimize for speed (set back to z for binary size)
 overflow-checks = false
 lto = "fat"
