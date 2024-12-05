@@ -7,7 +7,7 @@ use embassy_rp::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::Timer;
 
-pub const KEY_BOUNCE_THRESHOLD: u8 = 7;
+pub const KEY_BOUNCE_THRESHOLD: u8 = 20;
 
 pub static EVENTS: Channel<CriticalSectionRawMutex, Event, 64> = Channel::new();
 

@@ -56,7 +56,7 @@ pub async fn usb_task(config: UsbConfig) -> ! {
 	let config = embassy_usb::class::hid::Config {
 		report_descriptor: KeyboardReport::desc(),
 		request_handler:   None,
-		poll_ms:           2,
+		poll_ms:           5,
 		max_packet_size:   64,
 	};
 	let mut hid = HidWriter::<_, 16>::new(&mut builder, &mut state, config);
