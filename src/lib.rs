@@ -94,17 +94,9 @@ pub async fn run_alchemist(spawner: Spawner, side: BoardSide) -> ! {
 	spawner.spawn(usb::usb_task(usb_config)).unwrap();
 
 	let oled_config = oled::OledConfig {
-		scene:         match side {
-			BoardSide::Right => oled::Scene::Banner,
-			BoardSide::Left => oled::Scene::Alchemist,
-		},
-		star_movement: match side {
-			BoardSide::Right => oled::StarMovement::Down,
-			BoardSide::Left => oled::StarMovement::Up,
-		},
-		i2c1:          p.I2C1,
-		pin_3:         p.PIN_3,
-		pin_2:         p.PIN_2,
+		i2c1:  p.I2C1,
+		pin_3: p.PIN_3,
+		pin_2: p.PIN_2,
 	};
 
 	spawner.spawn(oled::oled_task(oled_config)).unwrap();

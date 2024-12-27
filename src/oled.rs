@@ -1,3 +1,6 @@
+// Based entirely on the stars example from:
+// https://people.ece.cornell.edu/land/courses/ece4760/labs/s2021/stars/stars.html
+
 use embassy_rp::{
 	clocks::RoscRng,
 	i2c::{self, Async, I2c},
@@ -9,45 +12,58 @@ use rand::{Rng, SeedableRng, rngs::SmallRng};
 use crate::frames;
 
 const SZ: usize = 128 * 32 / 8;
-const ROW_SZ: usize = 32 / 8;
 const OLED_ADDR: u16 = 0x3C;
 const FREQUENCY: u32 = 200_000;
+const STAR_TOTAL: usize = 64;
+const MIN_STARS: usize = 3;
+const DEATH_TIME: u16 = 60;
+const MIN_LIFETIME: u16 = 100;
+const MAX_LIFETIME: u16 = 500;
 
 static mut BUFFERS: [[u8; SZ]; 2] = [[0; SZ]; 2];
 
-static mut STAR_SPAWN_COUNT: usize = 0;
-static mut SIGIL_UPDATE: bool = true;
+static mut SPAWN_COUNT: usize = 0;
+
+#[expect(non_camel_case_types)]
+type fx16 = ::fixed::FixedI32<::fixed::types::extra::U16>;
 
 pub fn spawn_star() {
 	unsafe {
-		STAR_SPAWN_COUNT += 1;
-		SIGIL_UPDATE = true;
+		SPAWN_COUNT += 1;
 	}
 }
 
-#[derive(Clone, Copy)]
-pub enum Scene {
-	Banner,
-	Alchemist,
-}
+static TURN_FACTOR: fx16 = fx16::lit("0.2");
+static VISUAL_RANGE: fx16 = fx16::lit("10");
+static PROTECTED_RANGE: fx16 = fx16::lit("4");
+static CENTERING_FACTOR: fx16 = fx16::lit("0.0005");
+static AVOID_FACTOR: fx16 = fx16::lit("0.05");
+static MATCHING_FACTOR: fx16 = fx16::lit("0.03");
+static MAX_SPEED: fx16 = fx16::lit("2");
+static MIN_SPEED: fx16 = fx16::lit("0.4");
 
-#[derive(Clone, Copy)]
-pub enum StarMovement {
-	Up,
-	Down,
-}
+static WIDTH: fx16 = fx16::lit("32");
+static HEIGHT: fx16 = fx16::lit("128");
+static PADDING: fx16 = fx16::lit("2");
 
 pub struct OledConfig {
-	pub scene:         Scene,
-	pub star_movement: StarMovement,
-	pub i2c1:          I2C1,
-	pub pin_3:         PIN_3,
-	pub pin_2:         PIN_2,
+	pub i2c1:  I2C1,
+	pub pin_3: PIN_3,
+	pub pin_2: PIN_2,
+}
+
+#[derive(Clone, Copy)]
+struct Star {
+	x:        fx16,
+	y:        fx16,
+	vx:       fx16,
+	vy:       fx16,
+	lifetime: u16,
 }
 
 #[embassy_executor::task]
 pub async fn oled_task(config: OledConfig) -> ! {
-	static mut STAR_BUFFER: [u8; SZ] = [0; SZ];
+	static mut STAR_BUFFER: [Option<Star>; STAR_TOTAL] = [None; STAR_TOTAL];
 
 	let mut i2c_config = i2c::Config::default();
 	i2c_config.frequency = FREQUENCY;
@@ -67,89 +83,223 @@ pub async fn oled_task(config: OledConfig) -> ! {
 
 	let mut frame_counter: usize = 0;
 
-	let mut sigil_num = 0;
-	let mut sig_x = 0;
-	let mut sig_y = 0;
+	let mut xpos_avg: fx16;
+	let mut ypos_avg: fx16;
+	let mut xvel_avg: fx16;
+	let mut yvel_avg: fx16;
+	let mut neighboring_stars: fx16;
+	let mut close_dx: fx16;
+	let mut close_dy: fx16;
 
+	#[expect(static_mut_refs)]
 	loop {
-		frame_counter = frame_counter.wrapping_add(1);
-
-		if unsafe { SIGIL_UPDATE } {
-			sigil_num = rng.gen_range(0..frames::SIGILS.len());
-			sig_x = (rng.gen_range(0..2) + 1) * 8;
-			sig_y = (rng.gen_range(0..4) + 4) * 8;
-			unsafe { SIGIL_UPDATE = false };
+		unsafe {
+			SPAWN_COUNT = SPAWN_COUNT.min(STAR_TOTAL);
 		}
+
+		frame_counter = frame_counter.wrapping_add(1);
 
 		let buffer = unsafe { &mut BUFFERS[buffer_idx] };
 		buffer_idx = 1 - buffer_idx;
 
-		// Copy the stars
-		let spawn_count = unsafe {
-			if (frame_counter % 4) < rng.gen_range(0..4) {
-				let spawn_count = STAR_SPAWN_COUNT.min(4);
-				STAR_SPAWN_COUNT = STAR_SPAWN_COUNT.saturating_sub(spawn_count);
-				spawn_count
-			} else {
-				0
-			}
-		};
+		buffer.fill(0);
 
-		match config.star_movement {
-			StarMovement::Up => {
-				(&mut buffer[..(SZ - ROW_SZ)]).copy_from_slice(unsafe { &STAR_BUFFER[ROW_SZ..] });
+		let protected_range_squared = PROTECTED_RANGE * PROTECTED_RANGE;
+		let visual_range_squared = VISUAL_RANGE * VISUAL_RANGE;
 
-				let last_row = &mut buffer[(SZ - ROW_SZ)..];
-				last_row.fill(0);
+		let left_bound = PADDING;
+		let right_bound = WIDTH - PADDING;
+		let top_bound = PADDING;
+		let bottom_bound = HEIGHT - PADDING;
 
-				for _ in 0..spawn_count {
-					let x = rng.gen_range(0..32);
-					last_row[x / 8] |= 1 << (x % 8);
+		let mut total_found: usize = 0;
+
+		for our_idx in 0..unsafe { STAR_BUFFER.len() } {
+			if unsafe { STAR_BUFFER[our_idx] }.is_none() {
+				if unsafe { SPAWN_COUNT } > 0 {
+					unsafe {
+						SPAWN_COUNT = SPAWN_COUNT.saturating_sub(1);
+					}
+
+					let x = fx16::from_num(rng.gen_range(0..32));
+					let y = fx16::from_num(rng.gen_range(0..128));
+					let vx = fx16::from_num(rng.gen_range(-2..2));
+					let vy = fx16::from_num(rng.gen_range(-2..2));
+					let lifetime = rng.gen_range(MIN_LIFETIME..MAX_LIFETIME);
+
+					unsafe {
+						STAR_BUFFER[our_idx] = Some(Star {
+							x,
+							y,
+							vx,
+							vy,
+							lifetime,
+						});
+					}
 				}
 			}
-			StarMovement::Down => {
-				(&mut buffer[(32 / 8)..])
-					.copy_from_slice(unsafe { &STAR_BUFFER[..(32 / 8) * 127] });
 
-				let first_row = &mut buffer[..(32 / 8)];
-				first_row.fill(0);
+			let Some(star) = (unsafe { STAR_BUFFER[our_idx].as_ref() }) else {
+				continue;
+			};
 
-				for _ in 0..spawn_count {
-					let x = rng.gen_range(0..32);
-					first_row[x / 8] |= 1 << (x % 8);
+			total_found = total_found.saturating_add(1);
+
+			// Zero all accumulator registers
+			xpos_avg = fx16::lit("0");
+			ypos_avg = fx16::lit("0");
+			xvel_avg = fx16::lit("0");
+			yvel_avg = fx16::lit("0");
+			neighboring_stars = fx16::lit("0");
+			close_dx = fx16::lit("0");
+			close_dy = fx16::lit("0");
+
+			for other_idx in 0..unsafe { STAR_BUFFER.len() } {
+				if our_idx == other_idx {
+					continue;
+				}
+
+				let Some(other_star) = (unsafe { STAR_BUFFER[other_idx].as_ref() }) else {
+					continue;
+				};
+
+				// Compute differences in x and y coordinates
+				let dx = star.x.saturating_sub(other_star.x);
+				let dy = star.y.saturating_sub(other_star.y);
+
+				// Are both those differences less than the visual range?
+				if dx.saturating_abs() < VISUAL_RANGE && dy.saturating_abs() < VISUAL_RANGE {
+					// If so, calculate the squared distance
+					let squared_distance =
+						dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
+
+					if squared_distance < protected_range_squared {
+						// Is squared distance less than the protected range?
+						// If so, calculate difference in x/y-coordinates to nearfield star
+						close_dx = close_dx.saturating_add(star.x.saturating_sub(other_star.x));
+						close_dy = close_dy.saturating_add(star.y.saturating_sub(other_star.y));
+					} else if squared_distance < visual_range_squared {
+						// If not in protected range, is the star in the visual range?
+						// Add other star's x/y-coord and x/y vel to accumulator variables
+						xpos_avg = xpos_avg.saturating_add(other_star.x);
+						ypos_avg = ypos_avg.saturating_add(other_star.y);
+						xvel_avg = xvel_avg.saturating_add(other_star.vx);
+						yvel_avg = yvel_avg.saturating_add(other_star.vy);
+
+						// Increment number of stars within visual range
+						neighboring_stars = neighboring_stars.saturating_add(fx16::lit("1"));
+					}
+				}
+			}
+
+			let Some(star) = (unsafe { STAR_BUFFER[our_idx].as_mut() }) else {
+				continue;
+			};
+
+			// If there were any stars in the visual range...
+			if !neighboring_stars.is_zero() {
+				// Divide accumulator variables by number of stars in visual range
+				xpos_avg = xpos_avg.saturating_div(neighboring_stars);
+				ypos_avg = ypos_avg.saturating_div(neighboring_stars);
+				xvel_avg = xvel_avg.saturating_div(neighboring_stars);
+				yvel_avg = yvel_avg.saturating_div(neighboring_stars);
+
+				// Add the centering/matching contributions to velocity
+				star.vx = star.vx.saturating_add(
+					(xpos_avg.saturating_sub(star.x))
+						.saturating_mul(CENTERING_FACTOR)
+						.saturating_add(
+							(xvel_avg.saturating_sub(star.vx)).saturating_mul(MATCHING_FACTOR),
+						),
+				);
+
+				star.vy = star.vy.saturating_add(
+					(ypos_avg.saturating_sub(star.y))
+						.saturating_mul(CENTERING_FACTOR)
+						.saturating_add(
+							(yvel_avg.saturating_sub(star.vy)).saturating_mul(MATCHING_FACTOR),
+						),
+				);
+			}
+
+			// Add the avoidance contribution to velocity
+			star.vx = star
+				.vx
+				.saturating_add(close_dx.saturating_mul(AVOID_FACTOR));
+			star.vy = star
+				.vy
+				.saturating_add(close_dy.saturating_mul(AVOID_FACTOR));
+
+			// If the star is near an edge, make it turn by turnfactor
+			if star.y < top_bound {
+				star.vy = star.vy.saturating_add(TURN_FACTOR);
+			}
+			if star.x > right_bound {
+				star.vx = star.vx.saturating_sub(TURN_FACTOR);
+			}
+			if star.x < left_bound {
+				star.vx = star.vx.saturating_add(TURN_FACTOR);
+			}
+			if star.y > bottom_bound {
+				star.vy = star.vy.saturating_sub(TURN_FACTOR);
+			}
+
+			// Calculate the star's speed
+			let speed = (
+				star
+					.vx
+					.saturating_mul(star.vx)
+					.saturating_add(star.vy.saturating_mul(star.vy))
+				)
+				.wrapping_sqrt();
+
+			// Enforce min and max speeds
+			if speed < MIN_SPEED {
+				let speed = speed.max(fx16::from_bits(1));
+				star.vx = (star.vx.saturating_div(speed)).saturating_mul(MIN_SPEED);
+				star.vy = (star.vy.saturating_div(speed)).saturating_mul(MIN_SPEED);
+			}
+			if speed > MAX_SPEED {
+				star.vx = (star.vx.saturating_div(speed)).saturating_mul(MAX_SPEED);
+				star.vy = (star.vy.saturating_div(speed)).saturating_mul(MAX_SPEED);
+			}
+
+			// Update star's position
+			star.x = star.x.saturating_add(star.vx);
+			star.y = star.y.saturating_add(star.vy);
+
+			// If the star is puttering out (flickering) determine
+			// if it should display this frame.
+			let show_chance = star.lifetime.min(DEATH_TIME) as usize;
+			if (frame_counter % usize::from(DEATH_TIME)) < show_chance {
+				// Set its position in the buffer
+				let x: i32 = star.x.saturating_to_num();
+				let y: i32 = star.y.saturating_to_num();
+
+				if x >= 0 && x < 32 && y >= 0 && y < 128 {
+					let idx = ((y as usize) * 32) + (x as usize);
+					let byte = idx / 8;
+					let bit = idx % 8;
+					let mask = 1_u8 << bit;
+
+					buffer.get_mut(byte).map(|b| {
+						*b |= mask;
+					});
+				}
+			}
+
+			// Decrement the star's lifetime
+			star.lifetime = star.lifetime.saturating_sub(1);
+			if star.lifetime == 0 {
+				unsafe {
+					STAR_BUFFER[our_idx] = None;
 				}
 			}
 		}
 
-		// Copy back to the star buffer
-		// TODO: This is a bit wasteful, but it's fine for now.
-		// TODO: Just need to implement 'scrolling' copies from the star buffer.
-		#[expect(static_mut_refs)]
-		unsafe {
-			STAR_BUFFER.copy_from_slice(buffer)
-		};
-
-		// Apply the scene
-		let sigil = &frames::SIGILS[sigil_num % frames::SIGILS.len()];
-
-		match config.scene {
-			Scene::Banner => {
-				apply_mask(
-					buffer,
-					&frames::BANNER[(frame_counter / 10) % frames::BANNER.len()],
-					0,
-					0,
-				);
-				apply_mask(buffer, sigil, sig_x, sig_y + 32);
-			}
-			Scene::Alchemist => {
-				apply_mask(
-					buffer,
-					&frames::BODY[(frame_counter / 25) % frames::BODY.len()],
-					0,
-					128 - 32,
-				);
-				apply_mask(buffer, sigil, sig_x, sig_y);
+		if total_found < MIN_STARS && rng.gen_range(0..10) == 0 {
+			unsafe {
+				SPAWN_COUNT = SPAWN_COUNT.saturating_add(1);
 			}
 		}
 
