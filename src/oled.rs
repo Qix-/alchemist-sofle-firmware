@@ -14,13 +14,13 @@ use crate::frames;
 const SZ: usize = 128 * 32 / 8;
 const OLED_ADDR: u16 = 0x3C;
 const FREQUENCY: u32 = 200_000;
-const STAR_TOTAL: usize = 90;
+const STAR_TOTAL: usize = 30;
 const MIN_STARS: usize = 10;
 const MIN_LIFETIME: u16 = 80;
 const MAX_LIFETIME: u16 = 1000;
 const LONG_LIVED_CHANCE: u16 = 10;
 const LONG_LIVED_MULTIPLIER: u16 = 10;
-const MAX_SPAWN_COUNT: usize = STAR_TOTAL * 10;
+const MAX_SPAWN_COUNT: usize = STAR_TOTAL * 4;
 
 static DEATH_FADEOUT_LUT: &[u8] = &[0b1101_1111, 0b1110_1001, 0b1001_1000, 0b1100_0001];
 const DEATH_TIME: u16 = (DEATH_FADEOUT_LUT.len() * 8) as u16;
